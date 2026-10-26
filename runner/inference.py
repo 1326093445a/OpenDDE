@@ -1467,6 +1467,18 @@ class InferenceRunner(object):
         if _distributed_rank() == 0:
             logger.info(msg)
 
+    @torch.no_grad()
+    def predict_batch(self, data: list[Mapping[str, Any]]) -> list[dict[str, Any]]:
+        """Predict a ragged job list without sharing atom metadata between jobs."""
+        amp = (
+            torch.autocast(device_type=self.device.type, dtype=torch.bfloat16)
+            if self.configs.dtype == "bf16" and self.device.type in {"cuda", "mps"}
+            else nullcontext()
+        )
+        features = [to_device(item["input_feature_dict"], self.device) for item in data]
+        with amp:
+            return self.model.forward_batch(features)
+
     def update_model_configs(self, new_configs: OpenDDEConfig) -> None:
         """
         Update per-inference runtime configuration without rebuilding the model.
@@ -1563,6 +1575,11 @@ def _sampler_owns_inference_sample(sampler: Any, data: Mapping[str, Any]) -> boo
 
 def infer_predict(runner: InferenceRunner, configs: Any) -> None:
     """Run inference with CPU control planes for job/error coordination."""
+    if getattr(configs, "batch_size", 1) > 1:
+        from runner.batched_prediction import infer_predict_batched
+
+        with disable_cudnn_benchmark(runner.device):
+            return infer_predict_batched(runner, configs)
     control_group = getattr(runner, "foldcp_control_group", None)
     world_control_group = getattr(runner, "foldcp_world_control_group", None)
     cp_rank = int(getattr(runner, "foldcp_cp_rank", 0))

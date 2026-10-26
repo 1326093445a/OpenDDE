@@ -253,6 +253,56 @@ BF16 performance varies by Apple GPU and workload, so compare it with FP32 for
 your inputs. BF16 autocast needs macOS 14 or newer and is downgraded to FP32
 below that.
 
+## Multiple complexes per GPU
+
+For independent complexes without MSA, set `--batch_size` to the maximum number
+of jobs per GPU forward. Jobs may have different chain lengths and atom counts.
+Keep them in one JSON job list so the scheduler can collect them into batches:
+
+```bash
+opendde pred -i examples/cofold/no_msa_batch/inputs.json -o ./output/batched \
+  --use_msa false --use_template false --use_rna_msa false \
+  --batch_size 2 --sample 3
+```
+
+Here a full batch contains two complexes with three diffusion samples each.
+`--sample` and `--batch_size` are separate axes. The default `--batch_size 1`
+retains the existing single-job path and output layout. Each job/seed gets its
+own structures, confidence summaries, PAE/PDE maps, atom pLDDT and rankings.
+The final batch may be smaller. Jobs are grouped by approximate sequence length
+and precision policy; a CUDA out-of-memory failure retries smaller batches.
+
+The implementation pads and masks the Pairformer, structural refiner and
+diffusion token-transformer inputs. Atom encoding/decoding, reference geometry,
+chain mappings and confidence calculations remain per job with their original
+dimensions. Seeds and sampling streams are independent of batch membership.
+No MSA disables external alignments; the existing query-only MSA features remain.
+
+To distribute batches across GPUs, launch one worker per GPU:
+
+```bash
+CUDA_VISIBLE_DEVICES=0,1 LAYERNORM_TYPE=torch \
+  torchrun --standalone --nproc_per_node 2 -m runner.batch_inference pred \
+  -i examples/cofold/no_msa_batch/inputs.json -o ./output/batched_2gpu \
+  --device cuda --use_msa false --use_template false --use_rna_msa false \
+  --foldcp_mode single --batch_size 2 --sample 3
+```
+
+Each worker owns a disjoint subset of jobs and batches locally. This mode
+requires no MSA/templates/RNA MSA, no TFG guidance, `foldcp_mode=single`,
+`num_workers=0`, and `model.N_model_seed=1`; multiple per-job `modelSeeds` are
+supported. Trunk caching through `OPENDDE_TRUNK_CACHE` is unsupported.
+Triangle kernels use PyTorch (`auto` selects `torch` for batches); explicit
+cuEquivariance is rejected. CPU execution is covered by small-model tests;
+batched MPS execution has not been validated.
+
+Batching increases peak memory and may not improve speed for every workload.
+Use `--dtype fp32` for numerical comparisons, keep seeds and sampling settings
+fixed, and compare within tolerance: changing matrix shapes can change floating
+point results even with `--deterministic true`. See the
+[mixed-length fixtures](../examples/cofold/no_msa_batch/README.md) for validation
+commands and tested settings.
+
 ## Multi-GPU Fold-CP inference
 
 > [!IMPORTANT]
@@ -348,6 +398,8 @@ of [infer_json_format.md](./infer_json_format.md) and
 | `-n`, `--model_name` | Model name. Currently `opendde_v1`. |
 | `--load_checkpoint_path` | Explicit checkpoint path. |
 | `--seeds` | Comma-separated seeds, e.g. `101,102`. Overrides the job's `modelSeeds`; if unset, `modelSeeds` are used, or a random seed when both are absent. |
+| `--batch_size` | Maximum independent complexes per GPU forward; default `1`. Values above `1` require the no-MSA batching mode described above. |
+| `--sample` | Number of diffusion samples per complex, independent of `--batch_size`. |
 | `--use_msa` | Use/generate protein MSA features. |
 | `--use_template` | Use/generate template features. |
 | `--use_rna_msa` | Use/generate RNA MSA features; requires `--use_msa true`. |

@@ -107,8 +107,44 @@ def validate_config_triangle_kernels(configs: OpenDDEConfig) -> None:
     )
 
 
+def validate_input_batching(
+    configs: OpenDDEConfig, *, batch_size: int | None = None
+) -> None:
+    """Reject unsupported batching combinations before loading assets or weights."""
+    size = getattr(configs, "batch_size", 1) if batch_size is None else batch_size
+    if size < 1:
+        raise ValueError("batch_size must be at least 1.")
+    if size == 1:
+        return
+    incompatible = []
+    for key in ("use_msa", "use_template", "use_rna_msa"):
+        if getattr(configs, key):
+            incompatible.append(f"{key}=true")
+    if configs.sample_diffusion.guidance.get("enable", False):
+        incompatible.append("TFG guidance")
+    if configs.foldcp_mode != "single":
+        incompatible.append("Fold-CP context parallelism")
+    if configs.model.N_model_seed != 1:
+        incompatible.append("model.N_model_seed != 1 (use per-job modelSeeds instead)")
+    if configs.num_workers != 0:
+        incompatible.append(
+            "num_workers != 0 (per-job featurization seeding requires 0)"
+        )
+    if "cuequivariance" in (
+        configs.triangle_multiplicative,
+        configs.triangle_attention,
+    ):
+        incompatible.append("cuEquivariance triangle kernels (use torch or auto)")
+    if os.environ.get("OPENDDE_TRUNK_CACHE"):
+        incompatible.append("OPENDDE_TRUNK_CACHE")
+    if incompatible:
+        raise ValueError("batch_size > 1 does not support: " + ", ".join(incompatible))
+
+
 def validate_inference_schedule(configs: OpenDDEConfig) -> None:
     """Reject empty/negative inference schedules before model initialization."""
+
+    validate_input_batching(configs)
 
     for option, value in (
         ("model.N_cycle", configs.model.N_cycle),
@@ -205,6 +241,11 @@ def apply_runtime_compatibility(
 
     validate_inference_schedule(configs)
     validate_config_triangle_kernels(configs)
+
+    if getattr(configs, "batch_size", 1) > 1:
+        for key in ("triangle_multiplicative", "triangle_attention"):
+            if getattr(configs, key) == "auto":
+                setattr(configs, key, "torch")
 
     # The maintained 1 x P implementation owns the distributed triangle
     # schedule and is validated only with its PyTorch kernels.  Leaving the CLI

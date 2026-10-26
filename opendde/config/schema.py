@@ -351,6 +351,7 @@ class OpenDDEConfig(BaseConfig):
     input_json_path: Optional[str]
     load_checkpoint_dir: str
     num_workers: int
+    batch_size: int = 1
     use_msa: bool
     msa_pair_as_unpair: bool
     use_template: bool

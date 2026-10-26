@@ -389,6 +389,7 @@ def get_default_runner(
     foldcp_devices: str = "",
     foldcp_metrics_jsonl: str = "",
     *,
+    batch_size: int = 1,
     device: InferenceDevice = "auto",
 ) -> InferenceRunner:
     """
@@ -400,6 +401,7 @@ def get_default_runner(
         n_cycle (int): Number of Pairformer cycles.
         n_step (int): Number of diffusion steps.
         n_sample (int): Number of samples.
+        batch_size (int): Maximum independent complexes per GPU forward (no MSA).
         dtype (str): Inference data type. Defaults to 'bf16'.
         device (str): Device selection: auto, cpu, cuda, or mps.
         model_name (str): Name of the model checkpoint.
@@ -474,6 +476,7 @@ def get_default_runner(
     configs.sample_diffusion.N_step = n_step
     configs.dtype = dtype
     configs.device = device
+    configs.batch_size = batch_size
     configs.use_msa = use_msa
     configs.triangle_multiplicative = trimul_kernel
     configs.triangle_attention = triatt_kernel
@@ -560,6 +563,7 @@ def inference_jsons(
     foldcp_devices: str = "",
     foldcp_metrics_jsonl: str = "",
     *,
+    batch_size: int = 1,
     device: InferenceDevice = "auto",
 ) -> None:
     """
@@ -573,6 +577,7 @@ def inference_jsons(
         n_cycle (int): Number of cycles.
         n_step (int): Number of diffusion steps.
         n_sample (int): Number of samples.
+        batch_size (int): Maximum independent complexes per GPU forward (no MSA).
         dtype (str): Data type.
         device (str): Device selection: auto, cpu, cuda, or mps.
         model_name (str): Model name.
@@ -619,6 +624,7 @@ def inference_jsons(
         n_sample=n_sample,
         dtype=dtype,
         device=device,
+        batch_size=batch_size,
         model_name=model_name,
         load_checkpoint_path=load_checkpoint_path,
         use_msa=use_msa,
@@ -705,6 +711,13 @@ def inference_jsons(
 @click.option("-c", "--cycle", type=int, default=10, help="Pairformer cycle number.")
 @click.option("-p", "--step", type=int, default=200, help="Diffusion steps.")
 @click.option("-e", "--sample", type=int, default=5, help="Number of samples.")
+@click.option(
+    "--batch_size",
+    type=click.IntRange(min=1),
+    default=1,
+    show_default=True,
+    help="Independent complexes per GPU forward (no MSA/templates/guidance; Fold-CP single).",
+)
 @click.option(
     "-d",
     "--dtype",
@@ -951,6 +964,7 @@ def predict(
     foldcp_size_cp: int = 1,
     foldcp_devices: str = "",
     foldcp_metrics_jsonl: str = "",
+    batch_size: int = 1,
 ) -> None:
     """
     Run predictions with OpenDDE using various input formats.
@@ -1062,6 +1076,7 @@ def predict(
         n_cycle=cycle,
         n_step=step,
         n_sample=sample,
+        batch_size=batch_size,
         dtype=dtype,
         device=device,
         model_name=model_name,

@@ -452,6 +452,7 @@ class OpenDDE(nn.Module):
         inplace_safe: bool = False,
         chunk_size: Optional[int] = None,
         lazy_relp: bool = False,
+        run_refiner: bool = True,
     ) -> tuple[dict[str, Any], torch.Tensor, torch.Tensor, torch.Tensor]:
         if not self.enable_structural_token_expansion:
             return input_feature_dict, s_inputs, s, z
@@ -545,7 +546,7 @@ class OpenDDE(nn.Module):
             structural_feature_dict,
             lazy=lazy_relp,
         )
-        if self.enable_structural_token_refiner:
+        if self.enable_structural_token_refiner and run_refiner:
             s, z = self.structural_token_refiner(
                 s=s,
                 z=z,
@@ -2224,6 +2225,22 @@ class OpenDDE(nn.Module):
             return pred_dict, log_dict, time_tracker
 
         return pred_dict, log_dict, time_tracker
+
+    @torch.no_grad()
+    def forward_batch(self, features: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        """Predict independent complexes; each result retains the B=1 output schema."""
+        from opendde.config.inference import validate_input_batching
+        from opendde.model.batching import forward_batch
+
+        if not features:
+            raise ValueError("Inference batch must contain at least one job.")
+        validate_input_batching(self.configs, batch_size=len(features))
+        if self.training:
+            raise ValueError("Batched prediction requires model.eval().")
+        if len(features) == 1:
+            return [self(input_feature_dict=features[0], mode="inference")[0]]
+        with _tf32_runtime_scope(self.configs.enable_tf32):
+            return forward_batch(self, features)
 
     def forward(
         self,

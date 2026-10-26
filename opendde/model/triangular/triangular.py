@@ -630,6 +630,26 @@ class TriangleAttention(nn.Module):
         inplace_safe: bool = False,
     ) -> torch.Tensor:
         "triangle! triangle!"
+        if x.ndim > 3 and triangle_attention == "torch":
+            # Keep independent jobs separate while slicing triangle rows.
+            # chunk_layer's expand(...).reshape(...) would materialize a
+            # [B, N, H, N, N] triangle bias when flattening B and the expanded
+            # row axis. Slice first to bound that cubic temporary by the chunk.
+            output = torch.empty_like(x)
+            for start in range(0, x.shape[-3], chunk_size):
+                end = start + chunk_size
+                chunk = x[..., start:end, :, :]
+                chunk_biases = [
+                    bias if bias.shape[-4] == 1 else bias[..., start:end, :, :, :]
+                    for bias in biases
+                ]
+                output[..., start:end, :, :] = self.mha(
+                    q_x=chunk,
+                    kv_x=chunk,
+                    biases=chunk_biases,
+                    triangle_attention=triangle_attention,
+                )
+            return output
         mha_inputs = {
             "q_x": x,
             "kv_x": x,

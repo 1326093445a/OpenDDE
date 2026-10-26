@@ -1,0 +1,210 @@
+[
+  {
+    "name": "synthetic_complex_32_32",
+    "modelSeeds": [
+      101
+    ],
+    "sequences": [
+      {
+        "proteinChain": {
+          "sequence": "YEGFDKNHVCTRQLGCMDKEHSINAMLPAIWF",
+          "count": 1,
+          "id": [
+            "A"
+          ]
+        }
+      },
+      {
+        "proteinChain": {
+          "sequence": "CYPHHNMRTIFQDFSGKVWANGKEIDMCALEL",
+          "count": 1,
+          "id": [
+            "B"
+          ]
+        }
+      }
+    ]
+  },
+  {
+    "name": "synthetic_complex_32_64",
+    "modelSeeds": [
+      101
+    ],
+    "sequences": [
+      {
+        "proteinChain": {
+          "sequence": "CNEKSTMRWEPFLLNIIDHYKDCVMGAAHGQF",
+          "count": 1,
+          "id": [
+            "A"
+          ]
+        }
+      },
+      {
+        "proteinChain": {
+          "sequence": "TYVQNEHTCCPETDRCCIGMGRDGAAFFQMVSFNWKELWIAIYSVDKMPHKLNYLSAPEQRDWH",
+          "count": 1,
+          "id": [
+            "B"
+          ]
+        }
+      }
+    ]
+  },
+  {
+    "name": "synthetic_complex_64_64",
+    "modelSeeds": [
+      101
+    ],
+    "sequences": [
+      {
+        "proteinChain": {
+          "sequence": "INRMKCYQDDLSVRLNECKGCEEHEAMMAYYWNPGKWDDTQITQCFVASWVHRALHITPSFFPG",
+          "count": 1,
+          "id": [
+            "A"
+          ]
+        }
+      },
+      {
+        "proteinChain": {
+          "sequence": "KAQYFYIHANEQEGMPTMHDNGVKTPCRVDEWEWRHVNFWLDFPSLAGAISCCICQTYDMKLRS",
+          "count": 1,
+          "id": [
+            "B"
+          ]
+        }
+      }
+    ]
+  },
+  {
+    "name": "synthetic_complex_64_128",
+    "modelSeeds": [
+      101
+    ],
+    "sequences": [
+      {
+        "proteinChain": {
+          "sequence": "TTAYFEAYMLMCDHALPEWDQCYMRGEKSKDPHVNGQFKAQNRFTWHSIRDSEPCCVNGWLVII",
+          "count": 1,
+          "id": [
+            "A"
+          ]
+        }
+      },
+      {
+        "proteinChain": {
+          "sequence": "WQSGHCKHMADTESAEVVHVCFICCTIGWIEVILYNRQDMRNHYQPICKFNPKDNFATPALDLMYQPAHLDRECFHKMCLGIYFRYKSRVTLGWNPQIVGAEPYSEMDETQRDFKWFGWSAGNTWMSH",
+          "count": 1,
+          "id": [
+            "B"
+          ]
+        }
+      }
+    ]
+  },
+  {
+    "name": "synthetic_complex_128_128",
+    "modelSeeds": [
+      101
+    ],
+    "sequences": [
+      {
+        "proteinChain": {
+          "sequence": "LPFALYMWSMFRRKGKIEQGEYYHCMFSFHCIPRAIEAKHVLWAGNQLVCTAEMYEMVKNWLAADCNGPGEITTFIWDVKWCSHDQDDTKSCMPRRTSNVSVFHPHGHGTYFDENDYIWNQQPCIQLR",
+          "count": 1,
+          "id": [
+            "A"
+          ]
+        }
+      },
+      {
+        "proteinChain": {
+          "sequence": "NWIAPDEYHLWHLFTWKFPPCIESDYGAINMTFVTYWAACETMGCYGNGLCKHCFNDGTQKFEILTEPIEQFMKPWRQLDSQHCRKYSVFDADGRIPSDYHGLHMMMSWSNIVRQKERRCAVVNVAHQ",
+          "count": 1,
+          "id": [
+            "B"
+          ]
+        }
+      }
+    ]
+  },
+  {
+    "name": "synthetic_complex_128_256",
+    "modelSeeds": [
+      101
+    ],
+    "sequences": [
+      {
+        "proteinChain": {
+          "sequence": "NDWSMEVRHHKYLKTFGTDWFSMCYFPGFCLLASQRYMAVTICFSDFNVAQKACWFEPWIHEVINHQPNDQPRRPGVLGEKYTIGAATRMSYNTRMWLHMNQIGCYIHSGDEAQKCDLVHECPDKEWI",
+          "count": 1,
+          "id": [
+            "A"
+          ]
+        }
+      },
+      {
+        "proteinChain": {
+          "sequence": "RDLWRGVCWWNYTIDALSQEAFYSKGPEHKECCACDLQPTVYKLSCEIAFNQIYWKDGMSFWATVRTFVDIFCICDNFEMRNQNYRFHDIARYGQRNPVKGRNHPMCLEIFCSMRSGTIRGNKSYPHNKHLDSVQPADWYSLHMGSIEGMPHWYHQITMKKEPFWIYHWIANCREQKIAYLEMTFVPLDHVPNGFPNTLEVWKCHTCRAKSPYVGNLDMFLPCQGTMDARVQTQQHKEFWASHMLDMVAQSGWMTE",
+          "count": 1,
+          "id": [
+            "B"
+          ]
+        }
+      }
+    ]
+  },
+  {
+    "name": "synthetic_complex_256_256",
+    "modelSeeds": [
+      101
+    ],
+    "sequences": [
+      {
+        "proteinChain": {
+          "sequence": "MVMGLTFLWQGTYDLNECMAVKWVDHPVVQLSEYAKTPAMYSPQYQKEVGTRVACGVRQRDFHRCKDRDSCYYLVMKEMNQSSSDTIQHFIGTEEPQNAHIKQWIAPHLIRGHCWHCGPFIPKMCQTINNIYWIIRAFIWINLESGCANMYSLCCAMPRRYHGVTNLWNKWDMFYLGSGCLSSATMTRPKNHQKWEDWHTFSDPNFDSPQVMKRWDYEHRFGKEPARDHFLFCGCYFHEWFTIDVMQALENKNEPA",
+          "count": 1,
+          "id": [
+            "A"
+          ]
+        }
+      },
+      {
+        "proteinChain": {
+          "sequence": "RLRVGQTIVHIWRWCRDKTSMILCTEAGLNFAHRPFVVCAFEYKKGRFCLLQHPVILDLCGFEAYDINEVKTLWLHMPHTFKSKPHWCQNQIQFQTEGMADPEPYGMGPYYMIMAVSCGQMPHLQITNSKHYRFVGGPCYADENFNSKFCDYVSKFPASKWRYDWIDEDANWLHPGTMYDMTVSILMRISNPTFAMGAVNDSWEMGTRHQCAMEPSQFCWDHHLNKCRSIQKRTWYDEIQNEWNHQCKRNYAESWV",
+          "count": 1,
+          "id": [
+            "B"
+          ]
+        }
+      }
+    ]
+  },
+  {
+    "name": "synthetic_complex_256_512",
+    "modelSeeds": [
+      101
+    ],
+    "sequences": [
+      {
+        "proteinChain": {
+          "sequence": "VFADNHAMKDRQVSKPWTYGILQEHQNFSFADVSLHGWEHFCQDEFRYNDQHGKGSNMWCQWNMHSRDFLMHAPTFKDGYDWGACDAVQYLAMIGQYRIACRVNDPHKLPKCCTQQAYKSTDFNLTCKERPPESHGYRRNGISLWLQPTYDLNTVQPACFFMKTMWDEEQMPSWECVMKKFFAIALGTWEIGPYCKHKNSEALIHYGIEHPMIPIMVVWFTEMTPSTVRCYMNIRRLNSLIRNCWVWYEGCIVSRH",
+          "count": 1,
+          "id": [
+            "A"
+          ]
+        }
+      },
+      {
+        "proteinChain": {
+          "sequence": "NLIMRFLGIQPYFTHRREYDIEPRNECAFAQKKKAQIMMYQTIDTKLLPNTDNDRYMRMMWTVLGDEAAPKACHGHDKCFLLPWYCERQVYMAAAEIAQKLWIQRIPMHQYGFTCIHENIPQCCRIRWGDSCSCCCTFKHVYQKLQGTCWGEDHHYPTWVPSDIWSKYQIYRFVTGVWGMFNATWSITPVADLQMWYWPFLYRQDKLQPHPTNAPEPARSVRDHTRSVWTLMDQAIYKTSQMGEFALLRSIWDFMRLFVCMKTDKCASPWYNCNMMWINCFGPVFPWRYWKSVHEPASHMFEWFRDGRHSAWKEVCKSNKVEDMIRNEDCHQCMFDNFYQVNHHSEKGIQGNLWQVGWVVCEPSKGSVFGFSEILAHLRPSEHCSNQDDHLMFDQSLHNHTHSHYEVACHHGANIDFEVIFYKPTWGWGYGDYCFWRCMEERSMNIVFDSVLHSERFTMQCLIIETTKYTLNNGMAVNPKWPYYVANLGKATEIDTNGNLMGKYNAKMQCGP",
+          "count": 1,
+          "id": [
+            "B"
+          ]
+        }
+      }
+    ]
+  }
+]
