@@ -14,7 +14,7 @@ resolved tree: it gives static types to the ~170 consumption sites
 
 from typing import Any, Literal, Optional
 
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, Field
 
 InferenceDtype = Literal["bf16", "fp32"]
 INFERENCE_DTYPE_CHOICES: tuple[InferenceDtype, ...] = ("bf16", "fp32")
@@ -163,6 +163,11 @@ class InferSettingConfig(BaseConfig):
     # keys are token-count thresholds ("1024", "1536", ...) -> not identifiers
     chunk_size_thresholds: dict[str, int]
     sample_diffusion_chunk_size: Optional[int]
+    confidence_sample_chunk_size: Optional[int] = 1
+    diffusion_cache_max_mb: int = Field(default=2048, ge=0)
+    share_diffusion_sample_conditioning: bool = True
+    diffusion_attention_backend: Literal["reference", "efficient"] = "reference"
+    reuse_diffusion_window_masks: bool = True
 
 
 class NoiseSchedulerConfig(BaseConfig):

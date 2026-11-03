@@ -225,6 +225,38 @@ class OpenfoldLinear(nn.Linear):
         return nn.functional.linear(input, self.weight, self.bias)
 
 
+# Very large Torch 2.7 CUDA normalization calls can corrupt output rows.
+# Bound calls conservatively below the signed 32-bit element limit;
+# normalization never mixes these leading axes.
+_LAYER_NORM_MAX_ELEMENTS = 2**31 - 1
+
+
+def _bounded_layer_norm(x, normalized_shape, weight, bias, eps):
+    if x.numel() <= _LAYER_NORM_MAX_ELEMENTS:
+        return nn.functional.layer_norm(x, normalized_shape, weight, bias, eps)
+    batch_dims = x.ndim - len(normalized_shape)
+    axis = next((i for i in range(batch_dims) if x.shape[i] > 1), None)
+    if axis is None:
+        # A single normalization row cannot be split without changing meaning.
+        return nn.functional.layer_norm(x, normalized_shape, weight, bias, eps)
+    width = x.numel() // x.shape[axis]
+    chunk_size = max(1, _LAYER_NORM_MAX_ELEMENTS // width)
+    # Split before any reshape/contiguous copy, including for transposed pairs.
+    # Slice copies retain autograd while avoiding another full-sized cat buffer.
+    output = None
+    for start in range(0, x.shape[axis], chunk_size):
+        length = min(chunk_size, x.shape[axis] - start)
+        value = _bounded_layer_norm(
+            x.narrow(axis, start, length), normalized_shape, weight, bias, eps
+        )
+        if output is None:
+            # Autocast can promote FP16 normalization to FP32.
+            output = torch.empty(x.shape, dtype=value.dtype, device=value.device)
+        output.narrow(axis, start, length).copy_(value)
+    assert output is not None
+    return output
+
+
 class OpenFoldLayerNorm(nn.Module):
     def __init__(
         self,
@@ -253,7 +285,7 @@ class OpenFoldLayerNorm(nn.Module):
         d = x.dtype
         if d is torch.bfloat16:
             with disabled_autocast():
-                out = nn.functional.layer_norm(
+                out = _bounded_layer_norm(
                     x,
                     self.c_in,
                     self.weight.to(dtype=d) if self.weight is not None else None,
@@ -261,7 +293,7 @@ class OpenFoldLayerNorm(nn.Module):
                     self.eps,
                 )
         else:
-            out = nn.functional.layer_norm(
+            out = _bounded_layer_norm(
                 x,
                 self.c_in,
                 self.weight,
@@ -472,7 +504,7 @@ class Attention(nn.Module):
             scale = 1.0 / math.sqrt(self.c_hidden)
             o = cuequivariance_triangular_attn(
                 q, k, v, biases[1].float(), (biases[0] == 0).bool(), scale
-            )[0]
+            )
             o = o.transpose(-2, -3)
         else:
             o = _attention(q, k, v, biases)
@@ -490,10 +522,16 @@ def cuequivariance_triangular_attn(
     bias: torch.Tensor,
     mask: torch.Tensor,
     scale: float,
-) -> Union[torch.Tensor, tuple[torch.Tensor, torch.Tensor, torch.Tensor]]:
+) -> torch.Tensor:
     from cuequivariance_torch.primitives.triangle import triangle_attention
 
-    return triangle_attention(q, k, v, bias, mask=mask, scale=scale)
+    # return_aux=False returns a Tensor in the pinned cuEquivariance release.
+    # Indexing it with [0] silently broadcasts the first job to the other jobs.
+    output = triangle_attention(q, k, v, bias, mask=mask, scale=scale, return_aux=False)
+    output = output[0] if isinstance(output, tuple) else output
+    # The kernel inserts leading singleton axes for unbatched inputs. Restore
+    # exactly the query shape without selecting any independent job.
+    return output.reshape(q.shape)
 
 
 class OuterProductMean(nn.Module):

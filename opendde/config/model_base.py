@@ -49,6 +49,11 @@ model_configs: dict[str, Any] = {
             "2560": 128,
         },
         "sample_diffusion_chunk_size": ValueMaybeNone(5),
+        "confidence_sample_chunk_size": ValueMaybeNone(1),
+        "diffusion_cache_max_mb": 2048,
+        "share_diffusion_sample_conditioning": True,
+        "diffusion_attention_backend": "reference",
+        "reuse_diffusion_window_masks": True,
     },
     "inference_noise_scheduler": {
         "s_max": 160.0,

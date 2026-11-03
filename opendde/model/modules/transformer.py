@@ -25,6 +25,7 @@ from opendde.distributed.foldcp.atom_window import (
     window_block_range,
 )
 from opendde.distributed.foldcp.pair_sharding import FoldCPPairShardSpec
+from opendde.model.inference_cache import InferenceCacheBudget
 from opendde.model.modules.primitives import (
     AdaptiveLayerNorm,
     Attention,
@@ -45,6 +46,24 @@ from opendde.model.utils import (
 from opendde.utils.logger import get_logger
 
 logger = get_logger(__name__)
+
+
+@dataclass(frozen=True)
+class AtomBlockCache:
+    query_condition: tuple[torch.Tensor, torch.Tensor]
+    key_condition: tuple[torch.Tensor, torch.Tensor]
+    attention_gate: torch.Tensor
+    pair_bias: torch.Tensor
+    transition_condition: tuple[torch.Tensor, torch.Tensor]
+    transition_gate: torch.Tensor
+
+
+@dataclass(frozen=True)
+class AtomTransformerCache:
+    # Keep source identities with the request; never share caches across jobs.
+    single: torch.Tensor
+    pair: torch.Tensor
+    blocks: list[Optional[AtomBlockCache]]
 
 
 def _zero_foldcp_drain_buffer(tensor: torch.Tensor) -> None:
@@ -1082,6 +1101,7 @@ class AttentionPairBias(nn.Module):
         n_keys: int = 128,
         inplace_safe: bool = False,
         chunk_size: Optional[int] = None,
+        projected_bias: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         """Used by Algorithm 24, with beta_ij being the local mask. Used in AtomTransformer.
 
@@ -1107,12 +1127,10 @@ class AttentionPairBias(nn.Module):
         assert len(z.shape) == len(q.shape) + 2
 
         # Multi-head attention bias
-        bias = self.linear_nobias_z(
-            self.layernorm_z(z)
-        )  # [..., n_blocks, n_queries, n_keys, n_heads]
-        bias = permute_final_dims(
-            bias, [3, 0, 1, 2]
-        )  # [..., n_heads, n_blocks, n_queries, n_keys]
+        bias = projected_bias
+        if bias is None:
+            bias = self.linear_nobias_z(self.layernorm_z(z))
+            bias = permute_final_dims(bias, [3, 0, 1, 2])
         bias = self._align_bias_to_query(bias, q, n_pair_dims=3)
 
         # Line 11: Multi-head attention with attention bias & gating (and optionally local attention)
@@ -1282,6 +1300,7 @@ class AttentionPairBias(nn.Module):
         extra_attn_bias: Optional[torch.Tensor] = None,
         inplace_safe: bool = False,
         enable_efficient_fusion: bool = False,
+        pair_bias_cache: Optional[dict] = None,
     ) -> torch.Tensor:
         """Used by Algorithm 7/20
 
@@ -1300,39 +1319,49 @@ class AttentionPairBias(nn.Module):
                 [..., N_token, c_a]
         """
 
-        row_chunk_size = self._foldcp_diffusion_bias_row_chunk_size()
-        if (
-            row_chunk_size > 0
-            and not enable_efficient_fusion
-            and z.shape[-3] > row_chunk_size
-        ):
-            return self._standard_multihead_attention_stream_pair_bias(
-                q=q,
-                kv=kv,
-                z=z,
-                extra_attn_bias=extra_attn_bias,
-                inplace_safe=inplace_safe,
-                row_chunk_size=row_chunk_size,
-            )
-
-        # Multi-head attention bias
-        if enable_efficient_fusion:
-            layernorm_z_weight = cast(torch.Tensor, self.layernorm_z.weight)
-            weight = (self.linear_nobias_z.weight * layernorm_z_weight[None, :])[
-                :, :, None, None
-            ]
-            bias = F.conv2d(z, weight)
+        cache_enabled = (
+            pair_bias_cache is not None
+            and not self.training
+            and not torch.is_grad_enabled()
+        )
+        if cache_enabled and self in pair_bias_cache:
+            bias = pair_bias_cache[self]
         else:
-            bias = self.linear_nobias_z(self.layernorm_z(z))
-            bias = permute_final_dims(
-                bias, [2, 0, 1]
-            )  # [..., n_heads, N_token, N_token]
-        if extra_attn_bias is not None:
-            while len(extra_attn_bias.shape) < len(bias.shape) - 1:
-                extra_attn_bias = extra_attn_bias.unsqueeze(dim=0)
-            if len(extra_attn_bias.shape) == len(bias.shape) - 1:
-                extra_attn_bias = extra_attn_bias.unsqueeze(dim=-3)
-            bias = bias + extra_attn_bias.to(dtype=bias.dtype, device=bias.device)
+            row_chunk_size = self._foldcp_diffusion_bias_row_chunk_size()
+            if (
+                row_chunk_size > 0
+                and not enable_efficient_fusion
+                and z.shape[-3] > row_chunk_size
+            ):
+                return self._standard_multihead_attention_stream_pair_bias(
+                    q=q,
+                    kv=kv,
+                    z=z,
+                    extra_attn_bias=extra_attn_bias,
+                    inplace_safe=inplace_safe,
+                    row_chunk_size=row_chunk_size,
+                )
+
+            # Multi-head attention bias
+            if enable_efficient_fusion:
+                layernorm_z_weight = cast(torch.Tensor, self.layernorm_z.weight)
+                weight = (self.linear_nobias_z.weight * layernorm_z_weight[None, :])[
+                    :, :, None, None
+                ]
+                bias = F.conv2d(z, weight)
+            else:
+                bias = self.linear_nobias_z(self.layernorm_z(z))
+                bias = permute_final_dims(
+                    bias, [2, 0, 1]
+                )  # [..., n_heads, N_token, N_token]
+            if extra_attn_bias is not None:
+                while len(extra_attn_bias.shape) < len(bias.shape) - 1:
+                    extra_attn_bias = extra_attn_bias.unsqueeze(dim=0)
+                if len(extra_attn_bias.shape) == len(bias.shape) - 1:
+                    extra_attn_bias = extra_attn_bias.unsqueeze(dim=-3)
+                bias = bias + extra_attn_bias.to(dtype=bias.dtype, device=bias.device)
+            if cache_enabled:
+                pair_bias_cache[self] = bias
         bias = self._align_bias_to_query(bias, q, n_pair_dims=2)
 
         # Line 11: Multi-head attention with attention bias & gating (and optionally local attention)
@@ -1351,17 +1380,35 @@ class AttentionPairBias(nn.Module):
         chunk_size: Optional[int] = None,
         enable_efficient_fusion: bool = False,
         extra_attn_bias: Optional[torch.Tensor] = None,
+        pair_bias_cache: Optional[dict] = None,
+        atom_cache: Optional[AtomBlockCache] = None,
     ) -> torch.Tensor:
         """Details are given in local_forward and standard_forward"""
+        if atom_cache is not None and (
+            self.training or torch.is_grad_enabled() or not (n_queries and n_keys)
+        ):
+            raise ValueError("Atom caches require local attention in inference")
         # Input projections
         if self.has_s:
-            a = self.layernorm_a(a=a, s=s)
+            a = self.layernorm_a(
+                a=a,
+                s=s,
+                conditioning_cache=None
+                if atom_cache is None
+                else atom_cache.query_condition,
+            )
         else:
             a = self.layernorm_a(a)
 
         if self.cross_attention_mode:
             if self.has_s:
-                kv = self.layernorm_kv(a=a, s=s)
+                kv = self.layernorm_kv(
+                    a=a,
+                    s=s,
+                    conditioning_cache=None
+                    if atom_cache is None
+                    else atom_cache.key_condition,
+                )
             else:
                 kv = self.layernorm_kv(a)
         else:
@@ -1377,6 +1424,7 @@ class AttentionPairBias(nn.Module):
                 n_keys,
                 inplace_safe=inplace_safe,
                 chunk_size=chunk_size,
+                projected_bias=None if atom_cache is None else atom_cache.pair_bias,
             )
         else:
             a = self.standard_multihead_attention(
@@ -1386,14 +1434,20 @@ class AttentionPairBias(nn.Module):
                 extra_attn_bias=extra_attn_bias,
                 inplace_safe=inplace_safe,
                 enable_efficient_fusion=enable_efficient_fusion,
+                pair_bias_cache=pair_bias_cache,
             )
 
         # Output projection (from adaLN-Zero [27])
         if self.has_s:
+            gate = (
+                torch.sigmoid(self.linear_a_last(s))
+                if atom_cache is None
+                else atom_cache.attention_gate
+            )
             if inplace_safe:
-                a *= torch.sigmoid(self.linear_a_last(s))
+                a *= gate
             else:
-                a = torch.sigmoid(self.linear_a_last(s)) * a
+                a = gate * a
 
         return a
 
@@ -1567,6 +1621,8 @@ class DiffusionTransformerBlock(nn.Module):
         chunk_size: Optional[int] = None,
         enable_efficient_fusion: bool = False,
         extra_attn_bias: Optional[torch.Tensor] = None,
+        pair_bias_cache: Optional[dict] = None,
+        atom_cache: Optional[AtomBlockCache] = None,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         """
         Args:
@@ -1599,13 +1655,17 @@ class DiffusionTransformerBlock(nn.Module):
                 chunk_size=chunk_size,
                 enable_efficient_fusion=enable_efficient_fusion,
                 extra_attn_bias=extra_attn_bias,
+                pair_bias_cache=pair_bias_cache,
+                atom_cache=atom_cache,
             )
         )
         if inplace_safe:
             attn_out += a
         else:
             attn_out = attn_out + a
-        ff_out = self.residual_path(self.conditioned_transition_block(a=attn_out, s=s))
+        ff_out = self.residual_path(
+            self.conditioned_transition_block(a=attn_out, s=s, atom_cache=atom_cache)
+        )
         out_a = ff_out + attn_out
         # Avoid s/z to be deleted by torch.utils.checkpoint
         return out_a, s, z
@@ -1732,6 +1792,8 @@ class DiffusionTransformer(nn.Module):
         chunk_size: Optional[int] = None,
         enable_efficient_fusion: bool = False,
         extra_attn_bias: Optional[torch.Tensor] = None,
+        pair_bias_cache: Optional[dict] = None,
+        atom_caches: Optional[list[Optional[AtomBlockCache]]] = None,
     ) -> list[Any]:
         blocks = [
             partial(
@@ -1742,8 +1804,10 @@ class DiffusionTransformer(nn.Module):
                 chunk_size=chunk_size,
                 enable_efficient_fusion=enable_efficient_fusion,
                 extra_attn_bias=extra_attn_bias,
+                pair_bias_cache=pair_bias_cache,
+                atom_cache=None if atom_caches is None else atom_caches[i],
             )
-            for b in self.blocks
+            for i, b in enumerate(self.blocks)
         ]
         return blocks
 
@@ -1758,6 +1822,8 @@ class DiffusionTransformer(nn.Module):
         chunk_size: Optional[int] = None,
         enable_efficient_fusion: bool = False,
         extra_attn_bias: Optional[torch.Tensor] = None,
+        pair_bias_cache: Optional[dict] = None,
+        atom_caches: Optional[list[Optional[AtomBlockCache]]] = None,
     ) -> torch.Tensor:
         """
                 Args:
@@ -1782,6 +1848,8 @@ class DiffusionTransformer(nn.Module):
             chunk_size=chunk_size,
             enable_efficient_fusion=enable_efficient_fusion,
             extra_attn_bias=extra_attn_bias,
+            pair_bias_cache=pair_bias_cache,
+            atom_caches=atom_caches,
         )
         blocks_per_ckpt = self.blocks_per_ckpt
         if not torch.is_grad_enabled():
@@ -2183,6 +2251,47 @@ class AtomTransformer(nn.Module):
             blocks_per_ckpt=blocks_per_ckpt,
         )
 
+    def prepare_static_cache(
+        self,
+        c: torch.Tensor,
+        p: torch.Tensor,
+        budget: InferenceCacheBudget,
+    ) -> Optional[AtomTransformerCache]:
+        """Cache immutable per-block projections under a shared request budget."""
+        if self.training or torch.is_grad_enabled():
+            return None
+        rows = c.numel() // c.shape[-1]
+        pairs = p.numel() // p.shape[-1]
+        # Three adaptive norms (scale + shift), two gates, and local pair bias.
+        per_block = (8 * rows * self.c_atom + pairs * self.n_heads) * max(
+            4, c.element_size(), p.element_size()
+        )
+        blocks = []
+        for block in self.diffusion_transformer.blocks:
+            if not budget.reserve(per_block):
+                blocks.append(None)
+                continue
+            attention = block.attention_pair_bias
+            transition = block.conditioned_transition_block
+            blocks.append(
+                AtomBlockCache(
+                    query_condition=attention.layernorm_a.prepare_conditioning_cache(c),
+                    key_condition=attention.layernorm_kv.prepare_conditioning_cache(c),
+                    attention_gate=torch.sigmoid(attention.linear_a_last(c)),
+                    pair_bias=permute_final_dims(
+                        attention.linear_nobias_z(attention.layernorm_z(p)),
+                        [3, 0, 1, 2],
+                    ),
+                    transition_condition=transition.adaln.prepare_conditioning_cache(c),
+                    transition_gate=torch.sigmoid(transition.linear_s(c)),
+                )
+            )
+        return (
+            AtomTransformerCache(c, p, blocks)
+            if any(block is not None for block in blocks)
+            else None
+        )
+
     def forward(
         self,
         q: torch.Tensor,
@@ -2190,6 +2299,7 @@ class AtomTransformer(nn.Module):
         p: torch.Tensor,
         inplace_safe: bool = False,
         chunk_size: Optional[int] = None,
+        static_cache: Optional[AtomTransformerCache] = None,
     ) -> torch.Tensor:
         """
         Args:
@@ -2204,6 +2314,13 @@ class AtomTransformer(nn.Module):
             torch.Tensor: the output of AtomTransformer
                 [..., N_atom, c_atom]
         """
+        if static_cache is not None:
+            if self.training or torch.is_grad_enabled():
+                raise ValueError("Atom caches require evaluation without gradients")
+            if static_cache.single is not c or static_cache.pair is not p:
+                raise ValueError(
+                    "Atom cache belongs to a different request or condition"
+                )
         n_blocks, n_queries, n_keys = p.shape[-4:-1]
 
         assert n_queries == self.n_queries
@@ -2216,6 +2333,7 @@ class AtomTransformer(nn.Module):
             n_keys=self.n_keys,
             inplace_safe=inplace_safe,
             chunk_size=chunk_size,
+            atom_caches=None if static_cache is None else static_cache.blocks,
         )
 
     def forward_foldcp_window(
@@ -2267,7 +2385,12 @@ class ConditionedTransitionBlock(nn.Module):
             in_features=c_s, out_features=c_a, bias=True, biasinit=biasinit
         )
 
-    def forward(self, a: torch.Tensor, s: torch.Tensor) -> torch.Tensor:
+    def forward(
+        self,
+        a: torch.Tensor,
+        s: torch.Tensor,
+        atom_cache: Optional[AtomBlockCache] = None,
+    ) -> torch.Tensor:
         """
         Args:
             a (torch.Tensor): the single feature aggregate per-atom representation
@@ -2279,10 +2402,21 @@ class ConditionedTransitionBlock(nn.Module):
             torch.Tensor: the updated a from ConditionedTransitionBlock
                 [..., N, c_a]
         """
-        a = self.adaln(a, s)
+        a = self.adaln(
+            a,
+            s,
+            conditioning_cache=None
+            if atom_cache is None
+            else atom_cache.transition_condition,
+        )
         b = F.silu((self.linear_nobias_a1(a))) * self.linear_nobias_a2(a)
         # Output projection (from adaLN-Zero [27])
-        a = torch.sigmoid(self.linear_s(s)) * self.linear_nobias_b(b)
+        gate = (
+            torch.sigmoid(self.linear_s(s))
+            if atom_cache is None
+            else atom_cache.transition_gate
+        )
+        a = gate * self.linear_nobias_b(b)
         return a
 
 
@@ -3386,6 +3520,29 @@ class AtomAttentionEncoder(nn.Module):
             )  # [..., N_sample, n_blocks, n_queries, n_keys, c_atompair]
         return p_lm, c_l
 
+    def prepare_conditioned_cache(self, atom_to_token_idx, s, p_lm, c_l):
+        """Prepare the immutable atom context shared by all denoising steps."""
+        c_l = c_l.unsqueeze(-3) + broadcast_token_to_atom(
+            x_token=self.linear_no_bias_s(self.layernorm_s(s)),
+            atom_to_token_idx=atom_to_token_idx,
+        )
+        c_l_q, c_l_k, _ = rearrange_qk_to_dense_trunk(
+            q=c_l,
+            k=c_l,
+            dim_q=-2,
+            dim_k=-2,
+            n_queries=self.n_queries,
+            n_keys=self.n_keys,
+            compute_mask=False,
+        )
+        p_lm = self._add_atom_single_context_and_mlp(
+            p_lm.clone(),
+            c_l_q,
+            c_l_k,
+            inplace_safe=True,
+        )
+        return p_lm, c_l
+
     def forward(
         self,
         atom_to_token_idx: torch.Tensor,
@@ -3404,6 +3561,8 @@ class AtomAttentionEncoder(nn.Module):
         c_l: Optional[torch.Tensor] = None,
         inplace_safe: bool = False,
         chunk_size: Optional[int] = None,
+        conditioned_cache: Optional[tuple[torch.Tensor, torch.Tensor]] = None,
+        transformer_cache: Optional[AtomTransformerCache] = None,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
         """
         Args:
@@ -3439,68 +3598,82 @@ class AtomAttentionEncoder(nn.Module):
             assert s is not None
             assert z is not None
 
-        if p_lm is None or c_l is None:
-            p_lm, c_l = self.prepare_cache(
-                ref_pos=ref_pos,
-                ref_charge=ref_charge,
-                ref_mask=ref_mask,
-                ref_atom_name_chars=ref_atom_name_chars,
-                ref_element=ref_element,
-                atom_to_token_idx=atom_to_token_idx,
-                d_lm=d_lm,
-                v_lm=v_lm,
-                pad_info=pad_info,
-                r_l=r_l,
-                z=z,
+        if conditioned_cache is not None:
+            if (
+                torch.is_grad_enabled()
+                or not self.has_coords
+                or r_l is None
+                or s is None
+            ):
+                raise ValueError("Conditioned atom caches require coordinate inference")
+            p_lm, c_l = conditioned_cache
+            n_token = s.size(-2)
+            q_l = c_l + self.linear_no_bias_r(r_l)
+        else:
+            if p_lm is None or c_l is None:
+                p_lm, c_l = self.prepare_cache(
+                    ref_pos=ref_pos,
+                    ref_charge=ref_charge,
+                    ref_mask=ref_mask,
+                    ref_atom_name_chars=ref_atom_name_chars,
+                    ref_element=ref_element,
+                    atom_to_token_idx=atom_to_token_idx,
+                    d_lm=d_lm,
+                    v_lm=v_lm,
+                    pad_info=pad_info,
+                    r_l=r_l,
+                    z=z,
+                    inplace_safe=inplace_safe,
+                )
+            else:
+                if inplace_safe:
+                    p_lm_clone = p_lm.clone()
+                    c_l_clone = c_l.clone()
+                    p_lm = p_lm_clone
+                    c_l = c_l_clone
+
+            # Line7: Initialise the atom single representation as the single conditioning
+            # q_l = c_l.clone()
+
+            # If provided, add trunk embeddings and noisy positions
+            n_token = None
+            if r_l is not None:
+                assert s is not None
+                # Broadcast the single and pair embedding from the trunk
+                n_token = s.size(-2)
+                c_l = c_l.unsqueeze(dim=-3) + broadcast_token_to_atom(
+                    x_token=self.linear_no_bias_s(self.layernorm_s(s)),
+                    atom_to_token_idx=atom_to_token_idx,
+                )  # [..., N_sample, N_atom, c_atom]
+
+                # Add the noisy positions
+                # Different from paper!!
+                q_l = c_l + self.linear_no_bias_r(
+                    r_l
+                )  # [..., N_sample, N_atom, c_atom]
+            else:
+                q_l = c_l.clone()
+
+            # Add the combined single conditioning to the pair representation
+            c_l_q, c_l_k, _ = rearrange_qk_to_dense_trunk(
+                q=c_l,
+                k=c_l,
+                dim_q=-2,
+                dim_k=-2,
+                n_queries=self.n_queries,
+                n_keys=self.n_keys,
+                compute_mask=False,
+            )
+            p_lm = self._add_atom_single_context_and_mlp(
+                p_lm=p_lm,
+                c_l_q=c_l_q,
+                c_l_k=c_l_k,
                 inplace_safe=inplace_safe,
             )
-        else:
-            if inplace_safe:
-                p_lm_clone = p_lm.clone()
-                c_l_clone = c_l.clone()
-                p_lm = p_lm_clone
-                c_l = c_l_clone
-
-        # Line7: Initialise the atom single representation as the single conditioning
-        # q_l = c_l.clone()
-
-        # If provided, add trunk embeddings and noisy positions
-        n_token = None
-        if r_l is not None:
-            assert s is not None
-            # Broadcast the single and pair embedding from the trunk
-            n_token = s.size(-2)
-            c_l = c_l.unsqueeze(dim=-3) + broadcast_token_to_atom(
-                x_token=self.linear_no_bias_s(self.layernorm_s(s)),
-                atom_to_token_idx=atom_to_token_idx,
-            )  # [..., N_sample, N_atom, c_atom]
-
-            # Add the noisy positions
-            # Different from paper!!
-            q_l = c_l + self.linear_no_bias_r(r_l)  # [..., N_sample, N_atom, c_atom]
-        else:
-            q_l = c_l.clone()
-
-        # Add the combined single conditioning to the pair representation
-        c_l_q, c_l_k, _ = rearrange_qk_to_dense_trunk(
-            q=c_l,
-            k=c_l,
-            dim_q=-2,
-            dim_k=-2,
-            n_queries=self.n_queries,
-            n_keys=self.n_keys,
-            compute_mask=False,
-        )
-        p_lm = self._add_atom_single_context_and_mlp(
-            p_lm=p_lm,
-            c_l_q=c_l_q,
-            c_l_k=c_l_k,
-            inplace_safe=inplace_safe,
-        )
 
         # Cross attention transformer
         q_l = self.atom_transformer(
-            q_l, c_l, p_lm, chunk_size=chunk_size
+            q_l, c_l, p_lm, chunk_size=chunk_size, static_cache=transformer_cache
         )  # [..., (N_sample), N_atom, c_atom]
 
         # Aggregate per-atom representation to per-token representation
@@ -3723,6 +3896,7 @@ class AtomAttentionDecoder(nn.Module):
         p_skip: torch.Tensor,
         inplace_safe: bool = False,
         chunk_size: Optional[int] = None,
+        transformer_cache: Optional[AtomTransformerCache] = None,
     ) -> torch.Tensor:
         """
         Args:
@@ -3752,7 +3926,12 @@ class AtomAttentionDecoder(nn.Module):
 
         # Cross attention transformer
         q = self.atom_transformer(
-            q, c_skip, p_skip, inplace_safe=inplace_safe, chunk_size=chunk_size
+            q,
+            c_skip,
+            p_skip,
+            inplace_safe=inplace_safe,
+            chunk_size=chunk_size,
+            static_cache=transformer_cache,
         )
 
         # Map to positions update

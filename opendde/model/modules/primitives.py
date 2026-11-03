@@ -8,6 +8,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
+from opendde.model.inference_cache import get_diffusion_attention_execution
 from opendde.model.triangular.layers import LayerNorm, trunc_normal_init_
 from opendde.model.utils import (
     chunk_layer,
@@ -112,7 +113,19 @@ class AdaptiveLayerNorm(nn.Module):
             in_features=c_s, out_features=c_a, initializer="zeros"
         )
 
-    def forward(self, a: torch.Tensor, s: torch.Tensor) -> torch.Tensor:
+    def prepare_conditioning_cache(self, s: torch.Tensor):
+        """Project an immutable atom condition once for an inference request."""
+        if self.training or torch.is_grad_enabled():
+            raise ValueError("Conditioning caches require evaluation without gradients")
+        s = self.layernorm_s(s)
+        return torch.sigmoid(self.linear_s(s)), self.linear_nobias_s(s)
+
+    def forward(
+        self,
+        a: torch.Tensor,
+        s: torch.Tensor,
+        conditioning_cache: Optional[tuple[torch.Tensor, torch.Tensor]] = None,
+    ) -> torch.Tensor:
         """
         Args:
             a (torch.Tensor): the single feature aggregate per-atom representation
@@ -124,6 +137,13 @@ class AdaptiveLayerNorm(nn.Module):
             torch.Tensor: the updated a from AdaLN
                 [..., N_token, c_a]
         """
+        if conditioning_cache is not None:
+            if self.training or torch.is_grad_enabled():
+                raise ValueError(
+                    "Conditioning caches require evaluation without gradients"
+                )
+            scale, shift = conditioning_cache
+            return scale * self.layernorm_a(a) + shift
         a = self.layernorm_a(a)
         s = self.layernorm_s(s)
         a = torch.sigmoid(self.linear_s(s)) * a + self.linear_nobias_s(s)
@@ -265,6 +285,52 @@ def _mps_attention(
     return attn_output.reshape(*batch_shape, *attn_output.shape[-2:])
 
 
+def _attention_supported_layout(q, k, v, attn_bias):
+    """Use SDPA's supported 4D layouts without copying per-sample pair biases.
+
+    CUDA selects the available backend; unsupported devices/shapes retain
+    PyTorch's fallback. Precision, scale, masks and dropout are unchanged.
+    """
+
+    def run(query, key, value, bias):
+        return F.scaled_dot_product_attention(
+            query, key, value, attn_mask=bias, scale=1.0
+        )
+
+    if q.ndim == k.ndim == v.ndim == 3 and (attn_bias is None or attn_bias.ndim <= 3):
+        bias = (
+            attn_bias.unsqueeze(1)
+            if attn_bias is not None and attn_bias.ndim == 3
+            else attn_bias
+        )
+        return run(q.unsqueeze(1), k.unsqueeze(1), v.unsqueeze(1), bias).squeeze(1)
+    if (
+        q.ndim == k.ndim == v.ndim == 5
+        and k.shape[0] in (1, q.shape[0])
+        and v.shape[0] in (1, q.shape[0])
+        and (
+            attn_bias is None
+            or attn_bias.ndim < 5
+            or (attn_bias.ndim == 5 and attn_bias.shape[0] in (1, q.shape[0]))
+        )
+    ):
+        outputs = []
+        for i in range(q.shape[0]):
+            bias = attn_bias
+            if bias is not None and bias.ndim == 5:
+                bias = bias[i if bias.shape[0] != 1 else 0]
+            outputs.append(
+                run(
+                    q[i],
+                    k[i if k.shape[0] != 1 else 0],
+                    v[i if v.shape[0] != 1 else 0],
+                    bias,
+                )
+            )
+        return torch.stack(outputs)
+    return run(q, k, v, attn_bias)
+
+
 def _attention(
     q: torch.Tensor,
     k: torch.Tensor,
@@ -296,6 +362,9 @@ def _attention(
         attn_bias = attn_bias.to(dtype=torch.float32)
 
     if use_efficient_implementation:
+        execution = get_diffusion_attention_execution()
+        if execution is not None and execution.backend == "efficient" and q.is_cuda:
+            return _attention_supported_layout(q, k, v, attn_bias).to(dtype=input_dtype)
         if q.device.type == "mps":
             attn_output = _mps_attention(q=q, k=k, v=v, attn_bias=attn_bias)
         else:
@@ -521,6 +590,31 @@ def optimized_concat_split(attn_bias: torch.Tensor, n_queries: int) -> torch.Ten
     return output
 
 
+def _local_window_padding_bias(q, n_queries, n_keys, pad_left, inf, execution):
+    """Construct only [windows, queries, keys], avoiding an atom-count square."""
+    n = q.shape[-2]
+    key = (n, n_queries, n_keys, q.ndim, q.dtype, q.device, inf)
+    cached = execution.masks.get(key)
+    if cached is not None:
+        return cached
+    n_windows = (n + n_queries - 1) // n_queries
+    starts = torch.arange(n_windows, device=q.device) * n_queries
+    rows = starts[:, None] + torch.arange(n_queries, device=q.device)[None, :]
+    columns = (
+        starts[:, None] + torch.arange(n_keys, device=q.device)[None, :] - pad_left
+    )
+    valid = (
+        (rows[:, :, None] < n) & (columns[:, None, :] >= 0) & (columns[:, None, :] < n)
+    )
+    bias = q.new_zeros(n_windows, n_queries, n_keys).masked_fill_(~valid, -inf)
+    bias = bias.reshape(*([1] * (q.ndim - 2)), n_windows, n_queries, n_keys)
+    size = bias.numel() * bias.element_size()
+    if execution.mask_bytes + size <= execution.max_mask_bytes:
+        execution.masks[key] = bias
+        execution.mask_bytes += size
+    return bias
+
+
 def rearrange_to_dense_trunk(
     q: torch.Tensor,
     k: torch.Tensor,
@@ -575,6 +669,13 @@ def rearrange_to_dense_trunk(
         padding_info["k_pad_left"],
         padding_info["k_pad_right"],
     )
+
+    execution = get_diffusion_attention_execution()
+    if attn_bias is None and execution is not None and execution.reuse_window_masks:
+        bias = _local_window_padding_bias(
+            q, n_queries, n_keys, pad_left, inf, execution
+        )
+        return q_trunked, kv_trunked[0], kv_trunked[1], bias, q_pad_length
 
     # Padded_width = n + pad_left + pad_right
     if attn_bias is None:

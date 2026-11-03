@@ -12,6 +12,7 @@ import torch
 import torch.distributed as dist
 import torch.nn as nn
 
+from opendde.metrics.ipsae import feature_protein_token_groups
 from opendde.config.schema import OpenDDEConfig
 from opendde.data.tokenizer import STRUCTURAL_TOKEN_ROLES
 from opendde.distributed.foldcp.config import FoldCPConfig
@@ -1560,6 +1561,7 @@ class OpenDDE(nn.Module):
             z_trunk_spec=z_trunk_spec,
             pair_mask=pair_mask,
             x_pred_coords=x_pred_coords,
+            sample_chunk_size=self.configs.infer_setting.confidence_sample_chunk_size,
             triangle_multiplicative=triangle_multiplicative,
             triangle_attention=triangle_attention,
             inplace_safe=inplace_safe,
@@ -1620,8 +1622,6 @@ class OpenDDE(nn.Module):
         pair_input_feature_dict: dict[str, Any],
         N_cycle: int,
     ) -> dict[str, Any]:
-        torch.cuda.empty_cache()
-
         self.add_shape_complementarity_predictions(
             pred_dict=pred_dict,
             input_feature_dict=pair_input_feature_dict,
@@ -1664,6 +1664,15 @@ class OpenDDE(nn.Module):
             N_recycle=N_cycle,
             interested_atom_mask=None,
             return_full_data=bool(getattr(self.configs, "need_atom_confidence", False)),
+            ipsae_groups=(
+                feature_protein_token_groups(
+                    input_feature_dict,
+                    residue_confidence_inputs["atom_to_token_idx"],
+                    residue_confidence_inputs["token_asym_id"],
+                )
+                if {"ref_atom_name_chars", "is_protein"} <= input_feature_dict.keys()
+                else None
+            ),
             mol_id=None,
             elements_one_hot=None,
         )

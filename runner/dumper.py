@@ -16,6 +16,7 @@ from opendde.data.inference.input_validation import (
     validate_sample_name,
 )
 from opendde.data.utils import save_structure_cif
+from opendde.metrics.ipsae import ipsae_summary, protein_token_groups
 from opendde.utils.file_io import save_json
 
 
@@ -195,6 +196,7 @@ class DataDumper:
                 sample_name=pdb_id,
                 seed=seed,
                 sorted_indices=sorted_indices,
+                atom_array=atom_array,
             )
             self._replace_prediction_directory(staging_dir, prediction_save_dir)
             staging_dir = ""
@@ -305,6 +307,7 @@ class DataDumper:
         sample_name: str,
         seed: int,
         sorted_indices: Optional[List[int]],
+        atom_array: Optional[AtomArray] = None,
     ):
         """
         Save confidence data to JSON files.
@@ -319,19 +322,69 @@ class DataDumper:
         N_sample = len(data["summary_confidence"])
         if sorted_indices is None:
             sorted_indices = list(range(N_sample))
+        groups = None
+        full_data = data.get("full_data", [])
+        if (
+            atom_array is not None
+            and full_data
+            and "token_pair_pae" in full_data[0]
+            and "ipsae_min_10" not in data["summary_confidence"][0]
+        ):
+            groups = protein_token_groups(
+                atom_array,
+                full_data[0]["atom_to_token_idx"],
+                full_data[0]["token_pair_pae"].shape[-1],
+            )
         for idx, rank in enumerate(sorted_indices):
+            full = (
+                get_clean_full_confidence(full_data[idx])
+                if self.need_atom_confidence
+                else None
+            )
+            summary = dict(data["summary_confidence"][idx])
+            if (
+                summary.get("ipsae_parameters", {}).get("chain_id_type") == "asym_id"
+                and atom_array is not None
+            ):
+                labels = {
+                    str(asym): str(chain)
+                    for asym, chain in zip(atom_array.asym_id_int, atom_array.chain_id)
+                }
+                summary["ipsae_chain_pairs"] = [
+                    {
+                        **pair,
+                        "chain_1": labels[pair["chain_1"]],
+                        "chain_2": labels[pair["chain_2"]],
+                    }
+                    for pair in summary["ipsae_chain_pairs"]
+                ]
+                summary["ipsae_parameters"] = {
+                    key: value
+                    for key, value in summary["ipsae_parameters"].items()
+                    if key != "chain_id_type"
+                }
+            if groups is not None:
+                summary.update(
+                    ipsae_summary(
+                        full["token_pair_pae"]
+                        if full is not None
+                        else full_data[idx]["token_pair_pae"],
+                        groups,
+                        pae_is_rounded=full is not None,
+                    )
+                )
             output_fpath = os.path.join(
                 prediction_save_dir,
                 f"{sample_name}_summary_confidence_sample_{rank}.json",
             )
-            save_json(data["summary_confidence"][idx], output_fpath, indent=4)
+            save_json(summary, output_fpath, indent=4)
             if self.need_atom_confidence:
                 output_fpath = os.path.join(
                     prediction_save_dir,
                     f"{sample_name}_full_data_sample_{rank}.json",
                 )
                 save_json(
-                    get_clean_full_confidence(data["full_data"][idx]),
+                    full,
                     output_fpath,
                     indent=None,
                 )

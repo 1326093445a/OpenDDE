@@ -13,14 +13,17 @@ from typing import Any
 
 import numpy as np
 import torch
-import torch.nn.functional as F
 
+from opendde.model.inference_cache import (
+    InferenceCacheBudget,
+    diffusion_attention_scope,
+)
 from opendde.model.utils import centre_random_augmentation, permute_final_dims
 from opendde.utils.torch_utils import autocasting_disable_decorator
 
 
 def pad_token_tensors(
-    values: list[torch.Tensor], *, pair: bool = False
+    values: list[torch.Tensor], *, pair: bool = False, out: torch.Tensor | None = None
 ) -> torch.Tensor:
     """Stack [*, T, C] or [*, T, T, C], padding only their token axes."""
     if not values:
@@ -36,16 +39,25 @@ def pad_token_tensors(
                 "Token dimensions must be nonempty; pair tensors must be square."
             )
     size = max(value.shape[-2] for value in values)
-    return torch.stack(
-        [
-            F.pad(
-                value,
-                (0, 0, 0, size - value.shape[-2])
-                + ((0, size - value.shape[-3]) if pair else ()),
-            )
-            for value in values
-        ]
-    )
+    shape = (len(values), *prefix, *((size, size) if pair else (size,)), width)
+    if out is None:
+        out = values[0].new_zeros(shape)
+    else:
+        if (
+            out.shape != shape
+            or out.dtype != values[0].dtype
+            or out.device != values[0].device
+        ):
+            raise ValueError("Padding buffer has incompatible shape, dtype or device")
+        # Callers reusing storage must supply values that do not alias it.
+        out.zero_()
+    for i, value in enumerate(values):
+        n = value.shape[-2]
+        if pair:
+            out[i, ..., :n, :n, :].copy_(value)
+        else:
+            out[i, ..., :n, :].copy_(value)
+    return out
 
 
 def token_masks(
@@ -113,6 +125,9 @@ def _trunk_batch(model, features, chunk_size, kernels):
         initial_z.append(z_init)
     singles = [torch.zeros_like(x) for x in initial_s]
     pairs = [torch.zeros_like(x) for x in initial_z]
+    lengths = [s.shape[-2] for s in singles]
+    mask, bias = token_masks(lengths, initial_z[0])
+    s_batch, z_batch = None, None
     for _ in range(model.N_cycle):
         for i, feat in enumerate(features):
             z = initial_z[i] + model.linear_no_bias_z_cycle(
@@ -136,13 +151,40 @@ def _trunk_batch(model, features, chunk_size, kernels):
             singles[i] = initial_s[i] + model.linear_no_bias_s(
                 model.layernorm_s(singles[i])
             )
-        singles, pairs = pairformer_batch(
-            model.pairformer_stack, singles, pairs, chunk_size=chunk_size, **kernels
+        # All per-job updates above allocate before the previous recycle's
+        # padded buffers are overwritten. Only final outputs need owned copies.
+        s_batch = pad_token_tensors(singles, out=s_batch)
+        z_batch = pad_token_tensors(pairs, pair=True, out=z_batch)
+        s_batch, z_batch = model.pairformer_stack(
+            s=s_batch,
+            z=z_batch,
+            pair_mask=mask,
+            extra_attn_bias=bias,
+            inplace_safe=True,
+            chunk_size=chunk_size,
+            **kernels,
         )
-    return list(zip(inputs, singles, pairs, strict=True))
+        singles = [s_batch[i, :n] for i, n in enumerate(lengths)]
+        pairs = [z_batch[i, :n, :n] for i, n in enumerate(lengths)]
+    return [
+        (x, s.clone(), z.clone())
+        for x, s, z in zip(inputs, singles, pairs, strict=True)
+    ]
 
 
-def _denoise_batch(module, states, noisy, noise_levels, *, chunk_size, fusion):
+def _denoise_batch(
+    module,
+    states,
+    noisy,
+    noise_levels,
+    *,
+    chunk_size,
+    fusion,
+    static_pair=None,
+    attention_bias=None,
+    pair_bias_cache=None,
+    share_sample_conditioning=False,
+):
     """Unpadded atom encoders/decoders surrounding one batched token transformer."""
     atoms, conditions, pair_conditions, skips = [], [], [], []
     for state, x, level in zip(states, noisy, noise_levels, strict=True):
@@ -155,8 +197,9 @@ def _denoise_batch(module, states, noisy, noise_levels, *, chunk_size, fusion):
             s_trunk=s,
             z_trunk=z,
             pair_z=cache["pair_z"],
-            inplace_safe=True,
+            inplace_safe=False,
             use_conditioning=True,
+            single_s=cache.get("single_s"),
         )
         a, q, c, p = module.atom_attention_encoder(
             feat["atom_to_token_idx"],
@@ -173,27 +216,37 @@ def _denoise_batch(module, states, noisy, noise_levels, *, chunk_size, fusion):
             z=pair,
             p_lm=cache["p_lm/c_l"][0],
             c_l=cache["p_lm/c_l"][1],
+            conditioned_cache=cache.get("conditioned_atom"),
+            transformer_cache=cache.get("atom_encoder"),
             inplace_safe=True,
             chunk_size=chunk_size,
         )
         a = a.float() + module.linear_no_bias_s(module.layernorm_s(single))
         atoms.append(a)
-        conditions.append(single.float())
-        pair_conditions.append(
-            module.normalize(pair.float()) if fusion else pair.float()
+        # sample_diffusion_batch expands one scalar noise level across this
+        # job's samples. Only conditioning is shared; atom coordinates remain
+        # independent. General denoiser callers keep the default False.
+        conditions.append(
+            single[:1].float() if share_sample_conditioning else single.float()
         )
+        if static_pair is None:
+            pair_conditions.append(
+                module.normalize(pair.float()) if fusion else pair.float()
+            )
         skips.append((q, c, p))
     lengths = [a.shape[-2] for a in atoms]
     a_batch = pad_token_tensors(atoms)
     s_batch = pad_token_tensors(conditions)
-    z_batch = pad_token_tensors(pair_conditions, pair=True)
-    _, bias = token_masks(
-        lengths,
-        z_batch,
-        [state[0].get("structural_pair_attn_bias") for state in states],
-    )
-    if fusion:
-        z_batch = permute_final_dims(z_batch, [2, 0, 1]).contiguous()
+    z_batch, bias = static_pair, attention_bias
+    if z_batch is None:
+        z_batch = pad_token_tensors(pair_conditions, pair=True)
+        _, bias = token_masks(
+            lengths,
+            z_batch,
+            [state[0].get("structural_pair_attn_bias") for state in states],
+        )
+        if fusion:
+            z_batch = permute_final_dims(z_batch, [2, 0, 1]).contiguous()
     a_batch = module.diffusion_transformer(
         a=a_batch,
         s=s_batch,
@@ -202,6 +255,7 @@ def _denoise_batch(module, states, noisy, noise_levels, *, chunk_size, fusion):
         chunk_size=chunk_size,
         enable_efficient_fusion=fusion,
         extra_attn_bias=bias,
+        pair_bias_cache=pair_bias_cache,
     )
     del s_batch, z_batch, atoms, conditions, pair_conditions
     result = []
@@ -214,6 +268,7 @@ def _denoise_batch(module, states, noisy, noise_levels, *, chunk_size, fusion):
             q_skip=skip[0],
             c_skip=skip[1],
             p_skip=skip[2],
+            transformer_cache=state[4].get("atom_decoder"),
             inplace_safe=True,
             chunk_size=chunk_size,
         )
@@ -248,6 +303,11 @@ def sample_diffusion_batch(
     numpy_rngs = [np.random.default_rng(seed) for seed in seeds]
     outputs: list[list[torch.Tensor]] = [[] for _ in states]
     chunk_size = chunk_size or n_sample
+    # Avoid a scalar CUDA synchronization for every input at every step.
+    gammas = [
+        [float(gamma0) if value > gamma_min else 0.0 for value in schedule.tolist()[1:]]
+        for schedule in schedules
+    ]
     for start in range(0, n_sample, chunk_size):
         count = min(chunk_size, n_sample - start)
         coords = [
@@ -278,7 +338,7 @@ def sample_diffusion_batch(
                     .to(dtype)
                 )
                 last, current = schedule[step], schedule[step + 1]
-                gamma = float(gamma0) if current > gamma_min else 0
+                gamma = gammas[i][step]
                 level = last * (gamma + 1)
                 noisy.append(
                     x
@@ -332,9 +392,12 @@ def forward_batch(model, features: list[dict[str, Any]]) -> list[dict[str, Any]]
     # Bound score work across jobs as well as token rows.
     budget_chunk = max(1, 450_000_000 // (len(features) * n_max * n_max))
     chunk = min(chunk or budget_chunk, budget_chunk)
-    # The library entry point may not have passed through Runner's automatic
-    # kernel resolution. Input batching uses the validated PyTorch path.
-    kernels = dict(triangle_multiplicative="torch", triangle_attention="torch")
+    # Runner resolves auto against the actual CUDA runtime. Direct library
+    # callers retain a portable Torch fallback for unresolved auto values.
+    kernels = {
+        key: "torch" if getattr(cfg, key) == "auto" else getattr(cfg, key)
+        for key in ("triangle_multiplicative", "triangle_attention")
+    }
     residue = _trunk_batch(model, features, chunk, kernels)
     structural = [
         model.expand_to_structural_tokens(
@@ -413,30 +476,102 @@ def forward_batch(model, features: list[dict[str, Any]]) -> list[dict[str, Any]]
                     (feat, s_input.float(), s.float(), z.float(), local_cache)
                 )
             sample_schedules = [x.float() for x in schedules]
-        return sample_diffusion_batch(
-            sample_states,
-            lambda x, t: _denoise_batch(
-                model.diffusion_module,
-                sample_states,
-                x,
-                t,
-                chunk_size=chunk,
-                fusion=cfg.enable_efficient_fusion,
-            ),
-            schedules=sample_schedules,
-            seeds=seeds,
-            n_sample=cfg.sample_diffusion.N_sample,
-            chunk_size=cfg.infer_setting.sample_diffusion_chunk_size,
-            **{
-                key: getattr(cfg.sample_diffusion, key)
-                for key in (
-                    "gamma0",
-                    "gamma_min",
-                    "noise_scale_lambda",
-                    "step_scale_eta",
+        module = model.diffusion_module
+        static_pair, attention_bias, pair_bias_cache = None, None, None
+        if cfg.enable_diffusion_shared_vars_cache:
+            budget = InferenceCacheBudget.for_device(
+                cfg.infer_setting.diffusion_cache_max_mb,
+                sample_states[0][1].device,
+            )
+            for feat, s_input, s, z, cache in sample_states:
+                cache["single_s"] = module.diffusion_conditioning.prepare_single_cache(
+                    s_input, s
                 )
-            },
-        )
+                if all(value is not None for value in cache["p_lm/c_l"]):
+                    cache["conditioned_atom"] = (
+                        module.atom_attention_encoder.prepare_conditioned_cache(
+                            feat["atom_to_token_idx"],
+                            s.unsqueeze(-3),
+                            *cache["p_lm/c_l"],
+                        )
+                    )
+            if all(state[4]["pair_z"] is not None for state in sample_states):
+                pairs = [state[4]["pair_z"].float() for state in sample_states]
+                if cfg.enable_efficient_fusion:
+                    pairs = [module.normalize(pair) for pair in pairs]
+                static_pair = pad_token_tensors(pairs, pair=True)
+                _, attention_bias = token_masks(
+                    [pair.shape[-2] for pair in pairs],
+                    static_pair,
+                    [
+                        state[0].get("structural_pair_attn_bias")
+                        for state in sample_states
+                    ],
+                )
+                if cfg.enable_efficient_fusion:
+                    static_pair = permute_final_dims(
+                        static_pair, [2, 0, 1]
+                    ).contiguous()
+                # Bound resident projected biases; large inputs keep the
+                # existing streamed projection path instead of risking OOM.
+                transformer = module.diffusion_transformer
+                cache_bytes = (
+                    len(sample_states)
+                    * max(pair.shape[-2] for pair in pairs) ** 2
+                    * transformer.n_heads
+                    * transformer.n_blocks
+                    * 4
+                )
+                if budget.reserve(cache_bytes):
+                    pair_bias_cache = {}
+                del pairs
+            for *_, cache in sample_states:
+                conditioned = cache.get("conditioned_atom")
+                if conditioned is not None:
+                    p_lm, c_l = conditioned
+                    cache["atom_encoder"] = (
+                        module.atom_attention_encoder.atom_transformer.prepare_static_cache(
+                            c_l, p_lm, budget
+                        )
+                    )
+                    cache["atom_decoder"] = (
+                        module.atom_attention_decoder.atom_transformer.prepare_static_cache(
+                            c_l, p_lm, budget
+                        )
+                    )
+        with diffusion_attention_scope(
+            cfg.infer_setting.diffusion_attention_backend,
+            cfg.enable_diffusion_shared_vars_cache
+            and cfg.infer_setting.reuse_diffusion_window_masks,
+        ):
+            return sample_diffusion_batch(
+                sample_states,
+                lambda x, t: _denoise_batch(
+                    model.diffusion_module,
+                    sample_states,
+                    x,
+                    t,
+                    chunk_size=chunk,
+                    fusion=cfg.enable_efficient_fusion,
+                    static_pair=static_pair,
+                    attention_bias=attention_bias,
+                    pair_bias_cache=pair_bias_cache,
+                    share_sample_conditioning=cfg.infer_setting.share_diffusion_sample_conditioning,
+                ),
+                schedules=sample_schedules,
+                seeds=seeds,
+                n_sample=cfg.sample_diffusion.N_sample,
+                chunk_size=cfg.infer_setting.sample_diffusion_chunk_size,
+                **{
+                    key: getattr(cfg.sample_diffusion, key)
+                    for key in (
+                        "gamma0",
+                        "gamma_min",
+                        "noise_scale_lambda",
+                        "step_scale_eta",
+                    )
+                },
+            )
 
     coordinates = autocasting_disable_decorator(cfg.skip_amp.sample_diffusion)(sample)(
         states, schedules

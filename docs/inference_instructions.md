@@ -292,9 +292,41 @@ Each worker owns a disjoint subset of jobs and batches locally. This mode
 requires no MSA/templates/RNA MSA, no TFG guidance, `foldcp_mode=single`,
 `num_workers=0`, and `model.N_model_seed=1`; multiple per-job `modelSeeds` are
 supported. Trunk caching through `OPENDDE_TRUNK_CACHE` is unsupported.
-Triangle kernels use PyTorch (`auto` selects `torch` for batches); explicit
-cuEquivariance is rejected. CPU execution is covered by small-model tests;
+Triangle kernels support PyTorch and cuEquivariance for batches; `auto` selects
+cuEquivariance when its compatible CUDA packages are available and otherwise
+uses PyTorch. Add `--confidence_sample_chunk_size 5` to process five confidence
+samples together, with additional peak memory; the default remains `1`.
+Native `ipsae_min_10` is included in summary JSON even with
+`--need_atom_confidence false`. See [batch optimizations and score conventions](batched_inference_optimizations.md).
+CPU execution is covered by small-model tests;
 batched MPS execution has not been validated.
+
+Even with `foldcp_mode=single`, `torchrun` initializes NCCL for job coordination.
+If startup fails in `_create_foldcp_control_groups`, rerun with `NCCL_DEBUG=INFO`
+to identify the underlying transport error. An eight-GPU H200 startup probe
+with NCCL 2.26.2 failed in `transport/nvls.cc` with CUDA error 401
+(`the operation cannot be performed in the present state`), while two ranks
+passed. Disabling NVLink SHARP (NVLS) allowed all eight ranks to finish startup:
+
+```bash
+export NCCL_NVLS_ENABLE=0
+# Run the same torchrun command with the existing inference arguments.
+```
+
+This is a workaround for that NVLS initialization failure, not a general NCCL
+fix or an inference precision change. See NVIDIA's
+[NCCL environment-variable reference](https://docs.nvidia.com/deeplearning/nccl/user-guide/docs/env.html#nccl-nvls-enable).
+The probe validated startup only; it did not measure folding throughput.
+For diagnosis, inspect the Fabric Manager log as well as `nvidia-smi`: a fabric
+status of `Completed / Success` does not establish that NVLS multicast setup
+works. In the reproduced failure, Fabric Manager reported a missing member GPU
+handle and requested a reset of all GPUs in the partition. Its version matched
+the driver, but it had restarted since the last host boot. See NVIDIA's
+[NVLS troubleshooting guidance](https://docs.nvidia.com/cluster-readiness-engine/operations/troubleshooting#nccl-aborts-on-an-nvls-multicast-bind-failure)
+for recovery; a GPU reset or host reboot requires coordinated maintenance.
+Already-sharded workloads can also run one independent process per GPU using
+`CUDA_VISIBLE_DEVICES`, with distinct input shards and output directories and
+without `torchrun` or inherited distributed rank environment variables.
 
 Batching increases peak memory and may not improve speed for every workload.
 Use `--dtype fp32` for numerical comparisons, keep seeds and sampling settings

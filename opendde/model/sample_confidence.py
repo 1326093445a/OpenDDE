@@ -4,6 +4,7 @@ from typing import Any, Literal, Optional, overload
 
 import torch
 
+from opendde.metrics.ipsae import ipsae_summary
 from opendde.config.schema import BinConfig, OpenDDEConfig
 from opendde.metrics.clash import Clash
 from opendde.model.utils import distogram_bin_tops
@@ -66,6 +67,7 @@ def _compute_full_data_and_summary(
     elements_one_hot: Optional[torch.Tensor] = None,
     mol_id: Optional[torch.Tensor] = None,
     return_full_data: bool = False,
+    ipsae_groups: Optional[dict] = None,
 ) -> tuple[list[dict], list[dict]]:
     """
     Compute full data and summary confidence scores for the given inputs.
@@ -120,6 +122,11 @@ def _compute_full_data_and_summary(
         return_prob=True,
     )  # [N_s, N_token, N_token]
     del pae_logits
+    ipsae_scores = (
+        [ipsae_summary(pae, ipsae_groups) for pae in pae_score]
+        if ipsae_groups is not None
+        else None
+    )
     if return_full_data:
         full_data["token_pair_pae"] = pae_score
     else:
@@ -214,6 +221,13 @@ def _compute_full_data_and_summary(
     summary_confidence_by_sample = break_down_to_per_sample_dict(
         summary_confidence, shared_keys=["num_recycles"]
     )
+
+    if ipsae_scores is not None:
+        for summary, score in zip(
+            summary_confidence_by_sample, ipsae_scores, strict=True
+        ):
+            score["ipsae_parameters"]["chain_id_type"] = "asym_id"
+            summary.update(score)
 
     if return_full_data:
         # save extra inputs that are used for computing summary_confidence
@@ -863,6 +877,7 @@ def compute_full_data_and_summary(
     atom_is_polymer: torch.Tensor,
     N_recycle: int,
     return_full_data: bool = False,
+    ipsae_groups: Optional[dict] = None,
     interested_atom_mask: Optional[torch.Tensor] = None,
     mol_id: Optional[torch.Tensor] = None,
     elements_one_hot: Optional[torch.Tensor] = None,
@@ -908,6 +923,7 @@ def compute_full_data_and_summary(
             N_recycle=N_recycle,
             interested_atom_mask=interested_atom_mask,
             return_full_data=return_full_data,
+            ipsae_groups=ipsae_groups,
             mol_id=mol_id,
             elements_one_hot=elements_one_hot,
         )

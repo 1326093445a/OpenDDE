@@ -331,3 +331,43 @@ def test_triangle_chunking_keeps_broadcast_bias_unexpanded(monkeypatch):
     torch.testing.assert_close(actual, expected, atol=1e-6, rtol=1e-5)
     assert [shape[0][-3] for shape in shapes] == [3, 3, 1]
     assert all(shape[1] == (2, 1, 2, 7, 7) for shape in shapes)
+
+
+@pytest.mark.parametrize("sample_chunk", [2, 3, 5])
+def test_new_diffusion_reuse_preserves_five_samples_across_requests(sample_chunk):
+    from opendde.model.opendde import OpenDDE
+
+    torch.manual_seed(111)
+    cfg = _toy_config()
+    cfg.enable_efficient_fusion = True
+    cfg.enable_diffusion_shared_vars_cache = True
+    cfg.sample_diffusion.N_sample = 5
+    cfg.infer_setting.sample_diffusion_chunk_size = sample_chunk
+    model = OpenDDE(cfg).eval()
+    with torch.no_grad():
+        for param in model.parameters():
+            if param.ndim > 1 and not param.count_nonzero():
+                param.normal_(std=0.02)
+        for lengths in ((3, 5, 7), (7, 3, 5)):
+            feats = [_toy_features(n, 101 + i) for i, n in enumerate(lengths)]
+            cfg.infer_setting.reuse_diffusion_window_masks = False
+            cfg.infer_setting.diffusion_cache_max_mb = 0
+            cfg.infer_setting.share_diffusion_sample_conditioning = False
+            expected = model.forward_batch(copy.deepcopy(feats))
+            cfg.infer_setting.reuse_diffusion_window_masks = True
+            cfg.infer_setting.diffusion_cache_max_mb = 2048
+            cfg.infer_setting.share_diffusion_sample_conditioning = True
+            actual = model.forward_batch(copy.deepcopy(feats))
+            for want, got in zip(expected, actual, strict=True):
+                for key in ("coordinate", "plddt", "pae", "pde", "resolved"):
+                    assert got[key].shape[0] == 5
+                    torch.testing.assert_close(
+                        got[key], want[key], atol=2e-5, rtol=2e-5
+                    )
+                for reference, observed in zip(
+                    want["summary_confidence"], got["summary_confidence"], strict=True
+                ):
+                    for key in ("ptm", "iptm", "ranking_score"):
+                        torch.testing.assert_close(
+                            observed[key], reference[key], atol=2e-5, rtol=2e-5
+                        )

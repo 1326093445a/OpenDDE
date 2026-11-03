@@ -1051,6 +1051,12 @@ class DiffusionConditioning(nn.Module):
             flat[start:end] += self.transition_z2(flat[start:end])
         return pair_z.contiguous()
 
+    def prepare_single_cache(self, s_inputs, s_trunk):
+        """Noise-independent projection; caller owns the inference lifetime."""
+        return self.linear_no_bias_s(
+            self.layernorm_s(torch.cat([s_trunk, s_inputs], dim=-1))
+        )
+
     def forward(
         self,
         t_hat_noise_level: torch.Tensor,
@@ -1061,6 +1067,7 @@ class DiffusionConditioning(nn.Module):
         pair_z: torch.Tensor,
         inplace_safe: bool = False,
         use_conditioning: bool = True,
+        single_s: Optional[torch.Tensor] = None,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         """
         Args:
@@ -1099,10 +1106,8 @@ class DiffusionConditioning(nn.Module):
                 pair_z_clone = pair_z.clone()
                 pair_z = pair_z_clone
         # Single conditioning
-        single_s = torch.cat(
-            tensors=[s_trunk, s_inputs], dim=-1
-        )  # [..., N_tokens, c_s + c_s_inputs]
-        single_s = self.linear_no_bias_s(self.layernorm_s(single_s))
+        if single_s is None:
+            single_s = self.prepare_single_cache(s_inputs, s_trunk)
         noise_ratio = (t_hat_noise_level / self.sigma_data).clamp(min=1e-10)
         noise_n = self.fourier_embedding(
             t_hat_noise_level=torch.log(input=noise_ratio) / 4

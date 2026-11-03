@@ -390,6 +390,11 @@ def get_default_runner(
     foldcp_metrics_jsonl: str = "",
     *,
     batch_size: int = 1,
+    confidence_sample_chunk_size: Optional[int] = 1,
+    diffusion_cache_max_mb: int = 2048,
+    share_diffusion_sample_conditioning: bool = True,
+    diffusion_attention_backend: Literal["reference", "efficient"] = "reference",
+    reuse_diffusion_window_masks: bool = True,
     device: InferenceDevice = "auto",
 ) -> InferenceRunner:
     """
@@ -402,6 +407,11 @@ def get_default_runner(
         n_step (int): Number of diffusion steps.
         n_sample (int): Number of samples.
         batch_size (int): Maximum independent complexes per GPU forward (no MSA).
+        confidence_sample_chunk_size (Optional[int]): Samples per confidence call; None processes all samples.
+        diffusion_cache_max_mb (int): Resident budget in MiB for batched diffusion projection caches; 0 disables them.
+        share_diffusion_sample_conditioning (bool): Reuse identical per-step conditioning across samples in a native batch.
+        diffusion_attention_backend (str): Reference or optional efficient CUDA SDPA layout.
+        reuse_diffusion_window_masks (bool): Reuse bounded local atom attention masks.
         dtype (str): Inference data type. Defaults to 'bf16'.
         device (str): Device selection: auto, cpu, cuda, or mps.
         model_name (str): Name of the model checkpoint.
@@ -434,6 +444,10 @@ def get_default_runner(
         raise ValueError(
             f"device must be one of {INFERENCE_DEVICE_CHOICES}; got {device!r}."
         )
+    if diffusion_attention_backend not in ("reference", "efficient"):
+        raise ValueError("diffusion_attention_backend must be reference or efficient")
+    if diffusion_cache_max_mb < 0:
+        raise ValueError("diffusion_cache_max_mb must be nonnegative")
     validate_triangle_kernels(trimul_kernel, triatt_kernel)
     if use_rna_msa and not use_msa:
         raise ValueError(
@@ -477,6 +491,13 @@ def get_default_runner(
     configs.dtype = dtype
     configs.device = device
     configs.batch_size = batch_size
+    configs.infer_setting.confidence_sample_chunk_size = confidence_sample_chunk_size
+    configs.infer_setting.diffusion_cache_max_mb = diffusion_cache_max_mb
+    configs.infer_setting.share_diffusion_sample_conditioning = (
+        share_diffusion_sample_conditioning
+    )
+    configs.infer_setting.diffusion_attention_backend = diffusion_attention_backend
+    configs.infer_setting.reuse_diffusion_window_masks = reuse_diffusion_window_masks
     configs.use_msa = use_msa
     configs.triangle_multiplicative = trimul_kernel
     configs.triangle_attention = triatt_kernel
@@ -564,6 +585,11 @@ def inference_jsons(
     foldcp_metrics_jsonl: str = "",
     *,
     batch_size: int = 1,
+    confidence_sample_chunk_size: Optional[int] = 1,
+    diffusion_cache_max_mb: int = 2048,
+    share_diffusion_sample_conditioning: bool = True,
+    diffusion_attention_backend: Literal["reference", "efficient"] = "reference",
+    reuse_diffusion_window_masks: bool = True,
     device: InferenceDevice = "auto",
 ) -> None:
     """
@@ -578,6 +604,11 @@ def inference_jsons(
         n_step (int): Number of diffusion steps.
         n_sample (int): Number of samples.
         batch_size (int): Maximum independent complexes per GPU forward (no MSA).
+        confidence_sample_chunk_size (Optional[int]): Samples per confidence call; None processes all samples.
+        diffusion_cache_max_mb (int): Resident budget in MiB for batched diffusion projection caches; 0 disables them.
+        share_diffusion_sample_conditioning (bool): Reuse identical per-step conditioning across samples in a native batch.
+        diffusion_attention_backend (str): Reference or optional efficient CUDA SDPA layout.
+        reuse_diffusion_window_masks (bool): Reuse bounded local atom attention masks.
         dtype (str): Data type.
         device (str): Device selection: auto, cpu, cuda, or mps.
         model_name (str): Model name.
@@ -625,6 +656,11 @@ def inference_jsons(
         dtype=dtype,
         device=device,
         batch_size=batch_size,
+        confidence_sample_chunk_size=confidence_sample_chunk_size,
+        diffusion_cache_max_mb=diffusion_cache_max_mb,
+        share_diffusion_sample_conditioning=share_diffusion_sample_conditioning,
+        diffusion_attention_backend=diffusion_attention_backend,
+        reuse_diffusion_window_masks=reuse_diffusion_window_masks,
         model_name=model_name,
         load_checkpoint_path=load_checkpoint_path,
         use_msa=use_msa,
@@ -924,6 +960,36 @@ def inference_jsons(
     default=None,
     help="Number of CPUs for nhmmer.",
 )
+@click.option(
+    "--confidence_sample_chunk_size",
+    type=click.IntRange(min=1),
+    default=1,
+    help="Confidence samples processed together per complex; use 5 for five-sample inference when memory permits.",
+)
+@click.option(
+    "--diffusion_cache_max_mb",
+    type=click.IntRange(min=0),
+    default=2048,
+    help="Resident MiB limit for native batched diffusion projection caches; 0 disables them. CUDA also limits caches to available memory.",
+)
+@click.option(
+    "--share_diffusion_sample_conditioning",
+    type=bool,
+    default=True,
+    help="Share identical noise conditioning across samples within each native batch job.",
+)
+@click.option(
+    "--diffusion_attention_backend",
+    type=click.Choice(["reference", "efficient"]),
+    default="reference",
+    help="Native batched diffusion attention: efficient enables supported CUDA SDPA layouts and can change floating-point predictions.",
+)
+@click.option(
+    "--reuse_diffusion_window_masks",
+    type=bool,
+    default=True,
+    help="Reuse bounded local attention padding masks during native batched diffusion.",
+)
 def predict(
     input: str,
     out_dir: str,
@@ -965,6 +1031,11 @@ def predict(
     foldcp_devices: str = "",
     foldcp_metrics_jsonl: str = "",
     batch_size: int = 1,
+    confidence_sample_chunk_size: int = 1,
+    diffusion_cache_max_mb: int = 2048,
+    share_diffusion_sample_conditioning: bool = True,
+    diffusion_attention_backend: Literal["reference", "efficient"] = "reference",
+    reuse_diffusion_window_masks: bool = True,
 ) -> None:
     """
     Run predictions with OpenDDE using various input formats.
@@ -1077,6 +1148,11 @@ def predict(
         n_step=step,
         n_sample=sample,
         batch_size=batch_size,
+        confidence_sample_chunk_size=confidence_sample_chunk_size,
+        diffusion_cache_max_mb=diffusion_cache_max_mb,
+        share_diffusion_sample_conditioning=share_diffusion_sample_conditioning,
+        diffusion_attention_backend=diffusion_attention_backend,
+        reuse_diffusion_window_masks=reuse_diffusion_window_masks,
         dtype=dtype,
         device=device,
         model_name=model_name,

@@ -168,7 +168,8 @@ def infer_predict_batched(runner, configs) -> None:
                     torch.cuda.max_memory_reserved(runner.device) / 2**30,
                 )
         del predictions
-        cleanup_device_memory(runner.device)
+        # Reuse allocator blocks for the next similarly-sized batch. OOM retry
+        # above still releases cached memory before splitting the work.
 
     pending = []
     bucket = None

@@ -215,6 +215,7 @@ class ConfidenceHead(nn.Module):
         compute_pae: bool = True,
         compute_pde: bool = True,
         compute_resolved: bool = True,
+        sample_chunk_size: Optional[int] = 1,
     ) -> tuple[
         Optional[torch.Tensor],
         Optional[torch.Tensor],
@@ -295,10 +296,11 @@ class ConfidenceHead(nn.Module):
                 )
                 prepared_z_trunk = z_init + prepared_z_trunk
                 del z_init
-            cleanup_device_memory(
-                prepared_z_trunk.device,
-                collect_garbage=False,
-            )
+            if use_foldcp_confidence:
+                cleanup_device_memory(
+                    prepared_z_trunk.device,
+                    collect_garbage=False,
+                )
             return (
                 prepared_s_inputs,
                 prepared_s_trunk,
@@ -341,6 +343,68 @@ class ConfidenceHead(nn.Module):
             output_shape = list(prediction.shape)
             output_shape.insert(sample_axis, N_sample)
             return prediction.new_empty(output_shape)
+
+        if sample_chunk_size is not None and sample_chunk_size < 1:
+            raise ValueError("confidence sample_chunk_size must be positive or None")
+        sample_chunk_size = sample_chunk_size or N_sample
+        if (
+            sample_chunk_size > 1
+            and N_sample > 1
+            and not use_foldcp_confidence
+            and not self.training
+            and not torch.is_grad_enabled()
+            and z_trunk.shape[-2] <= 2000
+        ):
+            outputs = [None, None, None, None]
+            for start in range(0, N_sample, sample_chunk_size):
+                count = min(sample_chunk_size, N_sample - start)
+                local_s = s_trunk.unsqueeze(-3).expand(
+                    *s_trunk.shape[:-2], count, *s_trunk.shape[-2:]
+                )
+                local_z = z_trunk.unsqueeze(-4).expand(
+                    *z_trunk.shape[:-3], count, *z_trunk.shape[-3:]
+                )
+                if inplace_safe:
+                    local_s, local_z = local_s.clone(), local_z.clone()
+                local_mask = (
+                    None
+                    if pair_mask is None
+                    else pair_mask.unsqueeze(-3).expand(
+                        *pair_mask.shape[:-2], count, *pair_mask.shape[-2:]
+                    )
+                )
+                predictions = self.memory_efficient_forward(
+                    input_feature_dict=input_feature_dict,
+                    s_trunk=local_s,
+                    z_pair=local_z,
+                    pair_mask=local_mask,
+                    x_pred_rep_coords=x_pred_rep_coords[
+                        ..., start : start + count, :, :
+                    ],
+                    triangle_multiplicative=triangle_multiplicative,
+                    triangle_attention=triangle_attention,
+                    inplace_safe=inplace_safe,
+                    chunk_size=chunk_size,
+                    compute_plddt=compute_plddt,
+                    compute_pae=compute_pae,
+                    compute_pde=compute_pde,
+                    compute_resolved=compute_resolved,
+                )
+                for index, (prediction, dim) in enumerate(
+                    zip(predictions, (-3, -4, -4, -3))
+                ):
+                    if prediction is None:
+                        continue
+                    # Keep pair logits on CPU, exactly as in the serial path.
+                    if index in (1, 2):
+                        prediction = prediction.cpu()
+                    if outputs[index] is None:
+                        shape = list(prediction.shape)
+                        shape[dim] = N_sample
+                        outputs[index] = prediction.new_empty(shape)
+                    outputs[index].narrow(dim, start, count).copy_(prediction)
+                del predictions, local_s, local_z, local_mask
+            return tuple(outputs)
 
         for i in range(N_sample):
             if use_foldcp_confidence:

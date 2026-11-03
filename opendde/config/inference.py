@@ -130,11 +130,6 @@ def validate_input_batching(
         incompatible.append(
             "num_workers != 0 (per-job featurization seeding requires 0)"
         )
-    if "cuequivariance" in (
-        configs.triangle_multiplicative,
-        configs.triangle_attention,
-    ):
-        incompatible.append("cuEquivariance triangle kernels (use torch or auto)")
     if os.environ.get("OPENDDE_TRUNK_CACHE"):
         incompatible.append("OPENDDE_TRUNK_CACHE")
     if incompatible:
@@ -160,6 +155,10 @@ def validate_inference_schedule(configs: OpenDDEConfig) -> None:
         (
             "infer_setting.sample_diffusion_chunk_size",
             configs.infer_setting.sample_diffusion_chunk_size,
+        ),
+        (
+            "infer_setting.confidence_sample_chunk_size",
+            configs.infer_setting.confidence_sample_chunk_size,
         ),
     ):
         if value is not None and value < 1:
@@ -241,11 +240,6 @@ def apply_runtime_compatibility(
 
     validate_inference_schedule(configs)
     validate_config_triangle_kernels(configs)
-
-    if getattr(configs, "batch_size", 1) > 1:
-        for key in ("triangle_multiplicative", "triangle_attention"):
-            if getattr(configs, key) == "auto":
-                setattr(configs, key, "torch")
 
     # The maintained 1 x P implementation owns the distributed triangle
     # schedule and is validated only with its PyTorch kernels.  Leaving the CLI
