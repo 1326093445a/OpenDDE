@@ -263,7 +263,8 @@ and padding-run timings are therefore excluded from speed conclusions. The
 FP32 efficient run repeated exactly; compared with reference attention, its
 maximum coordinate-component difference was 0.004456 A and expected-PAE
 maximum difference was 0.000705 A. These results do not justify a default
-backend change.
+backend change from that experiment alone: its timing was contaminated, and
+one input's numerical agreement is not a general accuracy qualification.
 
 ### BF16 padding and reproducibility controls
 
@@ -482,6 +483,186 @@ coordinates, confidence and native ipSAE can change numerically. Use
 FlashAttention package is needed. CPU/MPS retain their existing path, and
 unsupported CUDA shapes use PyTorch's normal fallback. Both options apply to native batches, including singleton groups; they do
 not modify trunk/confidence, legacy serial inference or Fold-CP execution.
+
+### Interpreting GPU contention
+
+CPU overlap does not explain lower sensitivity to GPU contention. If CPU time
+`C` stays fixed and GPU time `G` increases by a factor `s`, the serial wall-time
+ratio is `(C + s*G) / (C + G)`. CPU work dilutes that ratio; hiding it through
+overlap can make the ratio larger. Model-only timings here exclude preparation
+and output writing. Mol-1's optional input prefetch and background writer are
+off by default, and its published overlap comparison was itself contaminated
+by another GPU process, so it establishes neither a speedup nor a universal
+slowdown.
+
+The earlier two-input, five-sample profiles show different GPU work:
+
+| Stage | Mol-1, 512/640 tokens | OpenDDE, 256/320 residues, 498/624 structural tokens |
+| --- | ---: | ---: |
+| Trunk | 27.331 s | 10.767 s |
+| Diffusion sampling | 28.446 s | 28.995 s |
+| Confidence/heads | 6.249 s | 1.217 s |
+
+Diffusion accounts for approximately 46% and 70% of these respective profiles.
+OpenDDE's structural expansion explains why its diffusion token counts can be
+nearly twice its residue counts. These historical profiles use different input
+lengths, kernels and confidence precision policies; they are not a controlled
+cross-model throughput comparison or proof of a particular contention ratio.
+They also predate subsequent optimizations.
+
+The saved Torch 2.7.1 attention probe confirms that 5D global attention used
+math SDPA, while the supported 4D layout selected memory-efficient SDPA. The
+earlier layout prototype reduced warm model time from 37.826 s to 34.843 s
+(7.89%, one measured pass per variant). This supports optimizing diffusion,
+but does not measure its behavior under contention. Scheduling overhead and
+cache interference remain possible mechanisms, not conclusions from these
+stage totals; kernel counts alone do not establish context-switch counts or
+L2 eviction.
+
+The `empty_cache()` in structural-feature preparation belongs to
+`_maybe_expand_to_structural_tokens_foldcp_local`, which returns before that
+call when there is no distributed Fold-CP mesh. It is not a per-forward flush
+in ordinary single-GPU inference. Current OpenDDE and Mol-1 native batch
+runners both retain allocator blocks after successful batches; OOM recovery
+and legacy serial cleanup have separate behavior. Removing the Fold-CP flush
+would not optimize the native path measured here.
+
+On November 5, a controlled contention comparison was attempted on H200 GPU 7
+using complete 7r6r, a native singleton, BF16 trunk with FP32 diffusion, ten
+recycles, 200 steps and one sample. Both clean reference processes completed
+one warmup and three measured forwards. Instrumentation counted **zero
+`empty_cache()` calls in all eight forwards**. Diffusion represented roughly
+59% of model time for this one-sample workload, rather than the historical
+five-sample profile's 70%.
+
+In each attempt, an unrelated CUDA process appeared during the subsequent
+efficient-attention case. Monitoring stopped the benchmark's own process and
+marked the case contaminated; neither attempt reached the planned synthetic
+contender cases. No shared/idle ratio or new backend speed comparison is
+reported. The reference default is unchanged. The missing measurement is a
+matched, repeated reference/efficient comparison both alone and alongside the
+same contender, with stage timings, output comparisons and process monitoring.
+Use `predict_batch([job])` for the singleton: legacy CLI `--batch_size 1` does
+not exercise this attention option. Even a completed synthetic-contender test
+would characterize that workload, not establish a universal scheduler or L2
+cache explanation or a matched Mol-1 comparison.
+
+The production Torch 2.7.1 environment passed all **99** focused attention
+tests with CUDA enabled (`OPENDDE_RUN_BATCH_KERNEL_TESTS=1 python -m pytest
+tests/test_diffusion_attention_execution.py -q`). These cover layout/mask
+parity, precision, request-local state and multi-job sample ownership; they
+are correctness checks, not contention measurements.
+
+### Full-checkpoint attention validation on repository examples
+
+A subsequent production-environment check used `examples/cofold/example.json`
+with external MSA/templates disabled, ten recycles, 200 steps, one sample and
+seed 101. The trunk used BF16; diffusion and confidence used their normal FP32
+policy for these lengths. Both triangle kernels used cuEquivariance, TF32 was
+off, and the projection-cache budget was 2,048 MiB. The inputs had these public
+PAE-axis / structural-token counts: **7r6r 245/475**, **7pzb 600/1122**, and
+**7wux 1218/2300**. Counts include the examples' nucleic acids and ligands.
+
+7pzb and 7wux were each evaluated as native singletons, and 7r6r/7pzb as an
+unequal-length native batch. Three forwards per backend and grouping completed
+**18 forwards**, with all **12 within-setting repeat comparisons bitwise
+identical**. Checks covered finite outputs, per-job atom and PAE axes, exact
+atom-to-token and chain mappings, and eight written prediction/summary sets.
+Every written ipSAE result matched recomputation from that job's PAE. Timings
+from this correctness session are excluded from backend performance claims.
+
+The selected interfaces were `[["A"], ["B"]]` for 7pzb and
+`[["A", "B"], ["C", "D"]]` for the four-protein-chain 7wux example. The
+7pzb scalar was **0.2704062002441992** for both backends, both alone and in the
+batch. The 7wux pooled scalar was **0.0**, rather than null, with correct
+selected labels and all six individual chain-pair records retained. That zero
+verifies output plumbing, not a confident interaction. Five focused pooled
+score tests also passed, including a nonzero pooled oracle, exclusion of
+within-side/unlisted-chain contributions, and explicit two-chain compatibility.
+The targeted command was `python -m pytest tests/test_ipsae.py -q -k
+'grouped_interface or internal_interface or explicit_two_chain'`.
+
+Switching attention backends within a fixed grouping changed predictions:
+
+| Input and grouping | Maximum coordinate-component difference | Maximum expected-PAE difference |
+| --- | ---: | ---: |
+| 7r6r singleton, separate initial check | 0.001413 A | 0.000246 A |
+| 7pzb singleton | 0.000207 A | 0.000356 A |
+| 7wux singleton | 0.038095 A | 0.004174 A |
+| 7r6r in the two-input batch | 0.000367 A | 0.000206 A |
+| 7pzb in the two-input batch | 0.000153 A | 0.001802 A |
+
+The largest coordinate-component RMS difference was **0.001272 A** on 7wux.
+These are numerical comparisons, not experimental accuracy measurements.
+Separately, changing 7r6r from a native singleton to the padded 7r6r/7pzb batch
+with reference attention reproduced **7.544334 A aligned all-atom RMSD**.
+Keep grouping fixed when comparing backends or reproducing BF16 predictions;
+the padding effect must not be attributed to efficient attention. No allocator
+flush via `torch.cuda.empty_cache()` occurred inside any of these 18 forwards.
+
+### Attention timing and synthetic contention follow-up
+
+An initial clean 7r6r screen used the same settings and instrumented
+`predict_batch` stages. Three measured forwards followed a warmup for each
+backend, in reference-then-efficient order. Median model time fell from
+**7.871 s to 7.460 s (5.22%)**, and diffusion time from **4.630 s to 4.220 s**.
+No unrelated GPU process was detected during those accepted passes. Loading,
+featurization, validation and writing were excluded. This short, single-order
+screen supports a speed benefit on this input, not a general queue throughput
+estimate.
+
+The later contention experiment completed all four conditions in forward and
+reverse order: reference/efficient, each with and without an additional
+synthetic contender. Each block had one warmup and three measured forwards,
+giving **six measurements per condition and 32 forwards in total**. The
+contender repeatedly multiplied 8192-by-8192 BF16 matrices in a separate
+process, with at most eight GEMMs queued before synchronization and 384 MiB
+of tensor storage. Model code hashes matched the correctness session.
+
+**An unrelated `esmfold2` process was present throughout all 32 forwards.**
+Shared execution was explicitly allowed, so the experiment continued and
+recorded that process. The following are observations under shared GPU load;
+the first column is not an idle-GPU baseline, and the ratios do not isolate
+the synthetic contender's causal effect:
+
+| Attention | Without synthetic contender, median (range) | With synthetic contender, median (range) | Observed ratio |
+| --- | ---: | ---: | ---: |
+| Reference | 7.924 s (7.919–10.553) | 16.802 s (16.774–16.903) | 2.12x |
+| Efficient | 7.513 s (7.495–7.537) | 16.704 s (16.665–16.790) | 2.22x |
+
+The corresponding diffusion-stage ratios were **1.82x** and **1.97x**. This
+screen did not demonstrate reduced contention sensitivity from efficient
+attention. It also does not identify context-switch costs or L2 behavior.
+All eight retained end-of-block predictions matched their respective
+backend's earlier clean prediction bitwise, including confidence outputs.
+
+**Decision:** retain the `reference` default. `--diffusion_attention_backend
+efficient` is a validated opt-in for the tested native FP32-diffusion workloads
+when its numerical changes are acceptable. The initial clean screen supports
+using it for speed; the proposed contention argument does not support a default
+change. CPU/MPS, training, legacy serial inference and Fold-CP behavior remain
+as described above. Full-model AMP diffusion at larger lengths was not newly
+validated by this experiment.
+
+### Eight-GPU independent-worker smoke check
+
+Eight concurrent processes each ran the repository's 7r6r example on one H200,
+using `CUDA_VISIBLE_DEVICES`, native singleton inference and efficient
+attention. Each process used one warmup and two measured forwards at the same
+ten-cycle, 200-step, one-sample BF16/FP32 settings above. All **eight workers
+completed successfully**. Each repeated exactly, and every worker's retained
+prediction matched the earlier single-GPU efficient prediction bitwise across
+all outputs. Model/runner source hashes matched across the eight processes.
+The three written files per worker (CIF and confidence outputs) also matched
+byte for byte across all eight output directories.
+
+This validates the independent-process execution route; it does not exercise
+`torchrun`, NCCL or distributed Fold-CP. Other jobs remained on the devices.
+Observed per-worker median model times ranged from **7.559 to 19.364 s**, with
+**5.158 GiB peak allocated memory per worker**. The complete smoke run took
+**96.881 s including startup, preparation, validation and writing**. These
+shared-load observations are not an isolated eight-GPU scaling result or a
+throughput estimate for a heterogeneous production queue.
 
 ## Choosing a batch size
 
