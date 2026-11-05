@@ -211,8 +211,14 @@ def test_cli_projection_controls_reach_inference_without_changing_sample_counts(
             "200",
             "--diffusion_attention_backend",
             "efficient",
+            "--trimul_kernel",
+            "flashpairformer",
             "--reuse_diffusion_window_masks",
             "false",
+            "--batch_max_padding_ratio",
+            "1.4",
+            "--batch_max_pair_tokens",
+            "500000",
             "--diffusion_cache_max_mb",
             "0",
             "--share_diffusion_sample_conditioning",
@@ -222,7 +228,10 @@ def test_cli_projection_controls_reach_inference_without_changing_sample_counts(
     assert result.exit_code == 0, result.output
     assert len(captured) == 1
     assert captured[0]["diffusion_attention_backend"] == "efficient"
+    assert captured[0]["trimul_kernel"] == "flashpairformer"
     assert captured[0]["reuse_diffusion_window_masks"] is False
+    assert captured[0]["batch_max_padding_ratio"] == 1.4
+    assert captured[0]["batch_max_pair_tokens"] == 500000
     assert captured[0]["diffusion_cache_max_mb"] == 0
     assert captured[0]["share_diffusion_sample_conditioning"] is False
     assert (

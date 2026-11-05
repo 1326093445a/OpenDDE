@@ -2,7 +2,7 @@
 # Copyright (c) 2026 Aureka AI Research
 """Opt-in released-checkpoint parity test; requires CUDA and cached model assets.
 
-OPENDDE_RUN_BATCH_SMOKE=1 LAYERNORM_TYPE=torch python -m pytest \
+CUBLAS_WORKSPACE_CONFIG=:4096:8 OPENDDE_RUN_BATCH_SMOKE=1 LAYERNORM_TYPE=torch python -m pytest \
     tests/smoke/test_input_batching_runtime.py -q
 """
 

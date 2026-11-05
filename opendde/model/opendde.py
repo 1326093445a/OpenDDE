@@ -1664,6 +1664,7 @@ class OpenDDE(nn.Module):
             N_recycle=N_cycle,
             interested_atom_mask=None,
             return_full_data=bool(getattr(self.configs, "need_atom_confidence", False)),
+            ipsae_interface=input_feature_dict.get("ipsae_interface"),
             ipsae_groups=(
                 feature_protein_token_groups(
                     input_feature_dict,
@@ -2243,11 +2244,9 @@ class OpenDDE(nn.Module):
 
         if not features:
             raise ValueError("Inference batch must contain at least one job.")
-        validate_input_batching(self.configs, batch_size=len(features))
+        validate_input_batching(self.configs, batch_size=max(2, len(features)))
         if self.training:
             raise ValueError("Batched prediction requires model.eval().")
-        if len(features) == 1:
-            return [self(input_feature_dict=features[0], mode="inference")[0]]
         with _tf32_runtime_scope(self.configs.enable_tf32):
             return forward_batch(self, features)
 

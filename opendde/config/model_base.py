@@ -50,6 +50,8 @@ model_configs: dict[str, Any] = {
         },
         "sample_diffusion_chunk_size": ValueMaybeNone(5),
         "confidence_sample_chunk_size": ValueMaybeNone(1),
+        "batch_max_padding_ratio": 0.0,
+        "batch_max_pair_tokens": 0,
         "diffusion_cache_max_mb": 2048,
         "share_diffusion_sample_conditioning": True,
         "diffusion_attention_backend": "reference",

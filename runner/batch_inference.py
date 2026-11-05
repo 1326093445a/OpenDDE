@@ -391,6 +391,8 @@ def get_default_runner(
     *,
     batch_size: int = 1,
     confidence_sample_chunk_size: Optional[int] = 1,
+    batch_max_padding_ratio: float = 0.0,
+    batch_max_pair_tokens: int = 0,
     diffusion_cache_max_mb: int = 2048,
     share_diffusion_sample_conditioning: bool = True,
     diffusion_attention_backend: Literal["reference", "efficient"] = "reference",
@@ -408,6 +410,8 @@ def get_default_runner(
         n_sample (int): Number of samples.
         batch_size (int): Maximum independent complexes per GPU forward (no MSA).
         confidence_sample_chunk_size (Optional[int]): Samples per confidence call; None processes all samples.
+        batch_max_padding_ratio (float): Padding work ratio cap; 0 disables, otherwise at least 1.
+        batch_max_pair_tokens (int): Pair element budget; 0 disables.
         diffusion_cache_max_mb (int): Resident budget in MiB for batched diffusion projection caches; 0 disables them.
         share_diffusion_sample_conditioning (bool): Reuse identical per-step conditioning across samples in a native batch.
         diffusion_attention_backend (str): Reference or optional efficient CUDA SDPA layout.
@@ -492,6 +496,8 @@ def get_default_runner(
     configs.device = device
     configs.batch_size = batch_size
     configs.infer_setting.confidence_sample_chunk_size = confidence_sample_chunk_size
+    configs.infer_setting.batch_max_padding_ratio = batch_max_padding_ratio
+    configs.infer_setting.batch_max_pair_tokens = batch_max_pair_tokens
     configs.infer_setting.diffusion_cache_max_mb = diffusion_cache_max_mb
     configs.infer_setting.share_diffusion_sample_conditioning = (
         share_diffusion_sample_conditioning
@@ -586,6 +592,8 @@ def inference_jsons(
     *,
     batch_size: int = 1,
     confidence_sample_chunk_size: Optional[int] = 1,
+    batch_max_padding_ratio: float = 0.0,
+    batch_max_pair_tokens: int = 0,
     diffusion_cache_max_mb: int = 2048,
     share_diffusion_sample_conditioning: bool = True,
     diffusion_attention_backend: Literal["reference", "efficient"] = "reference",
@@ -605,6 +613,8 @@ def inference_jsons(
         n_sample (int): Number of samples.
         batch_size (int): Maximum independent complexes per GPU forward (no MSA).
         confidence_sample_chunk_size (Optional[int]): Samples per confidence call; None processes all samples.
+        batch_max_padding_ratio (float): Padding work ratio cap; 0 disables, otherwise at least 1.
+        batch_max_pair_tokens (int): Pair element budget; 0 disables.
         diffusion_cache_max_mb (int): Resident budget in MiB for batched diffusion projection caches; 0 disables them.
         share_diffusion_sample_conditioning (bool): Reuse identical per-step conditioning across samples in a native batch.
         diffusion_attention_backend (str): Reference or optional efficient CUDA SDPA layout.
@@ -657,6 +667,8 @@ def inference_jsons(
         device=device,
         batch_size=batch_size,
         confidence_sample_chunk_size=confidence_sample_chunk_size,
+        batch_max_padding_ratio=batch_max_padding_ratio,
+        batch_max_pair_tokens=batch_max_pair_tokens,
         diffusion_cache_max_mb=diffusion_cache_max_mb,
         share_diffusion_sample_conditioning=share_diffusion_sample_conditioning,
         diffusion_attention_backend=diffusion_attention_backend,
@@ -796,9 +808,11 @@ def inference_jsons(
 )
 @click.option(
     "--trimul_kernel",
-    type=click.Choice(("auto", "cuequivariance", "torch"), case_sensitive=False),
+    type=click.Choice(
+        ("auto", "cuequivariance", "torch", "flashpairformer"), case_sensitive=False
+    ),
     default="auto",
-    help="Triangle multiplicative update kernel ('auto', 'cuequivariance', or 'torch').",
+    help="Triangle multiplication: auto, cuequivariance, torch, or optional BF16 flashpairformer (TMK3).",
 )
 @click.option(
     "--triatt_kernel",
@@ -967,6 +981,18 @@ def inference_jsons(
     help="Confidence samples processed together per complex; use 5 for five-sample inference when memory permits.",
 )
 @click.option(
+    "--batch_max_padding_ratio",
+    type=click.FloatRange(min=0),
+    default=0.0,
+    help="Maximum padded/unpadded cubic token work; 0 disables, 1 groups equal lengths only.",
+)
+@click.option(
+    "--batch_max_pair_tokens",
+    type=click.IntRange(min=0),
+    default=0,
+    help="Maximum B * max_tokens**2 for a batch; 0 disables. Singletons remain allowed.",
+)
+@click.option(
     "--diffusion_cache_max_mb",
     type=click.IntRange(min=0),
     default=2048,
@@ -1036,6 +1062,8 @@ def predict(
     share_diffusion_sample_conditioning: bool = True,
     diffusion_attention_backend: Literal["reference", "efficient"] = "reference",
     reuse_diffusion_window_masks: bool = True,
+    batch_max_padding_ratio: float = 0.0,
+    batch_max_pair_tokens: int = 0,
 ) -> None:
     """
     Run predictions with OpenDDE using various input formats.
@@ -1149,6 +1177,8 @@ def predict(
         n_sample=sample,
         batch_size=batch_size,
         confidence_sample_chunk_size=confidence_sample_chunk_size,
+        batch_max_padding_ratio=batch_max_padding_ratio,
+        batch_max_pair_tokens=batch_max_pair_tokens,
         diffusion_cache_max_mb=diffusion_cache_max_mb,
         share_diffusion_sample_conditioning=share_diffusion_sample_conditioning,
         diffusion_attention_backend=diffusion_attention_backend,

@@ -68,6 +68,7 @@ def _compute_full_data_and_summary(
     mol_id: Optional[torch.Tensor] = None,
     return_full_data: bool = False,
     ipsae_groups: Optional[dict] = None,
+    ipsae_interface: Optional[list] = None,
 ) -> tuple[list[dict], list[dict]]:
     """
     Compute full data and summary confidence scores for the given inputs.
@@ -123,7 +124,10 @@ def _compute_full_data_and_summary(
     )  # [N_s, N_token, N_token]
     del pae_logits
     ipsae_scores = (
-        [ipsae_summary(pae, ipsae_groups) for pae in pae_score]
+        [
+            ipsae_summary(pae, ipsae_groups, interface=ipsae_interface)
+            for pae in pae_score
+        ]
         if ipsae_groups is not None
         else None
     )
@@ -881,6 +885,7 @@ def compute_full_data_and_summary(
     interested_atom_mask: Optional[torch.Tensor] = None,
     mol_id: Optional[torch.Tensor] = None,
     elements_one_hot: Optional[torch.Tensor] = None,
+    ipsae_interface: Optional[list] = None,
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
     """Wrapper of `_compute_full_data_and_summary` by enumerating over N samples"""
 
@@ -924,6 +929,7 @@ def compute_full_data_and_summary(
             interested_atom_mask=interested_atom_mask,
             return_full_data=return_full_data,
             ipsae_groups=ipsae_groups,
+            ipsae_interface=ipsae_interface,
             mol_id=mol_id,
             elements_one_hot=elements_one_hot,
         )

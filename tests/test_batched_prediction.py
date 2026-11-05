@@ -26,7 +26,13 @@ def _prediction(n_atom, n_token, seed):
 
 
 def _run_scheduler(
-    monkeypatch, *, rank=0, world_size=1, failure=None, unique_seeds=False
+    monkeypatch,
+    *,
+    rank=0,
+    world_size=1,
+    failure=None,
+    unique_seeds=False,
+    padding_ratio=0.0,
 ):
     jobs = [
         {
@@ -43,6 +49,7 @@ def _run_scheduler(
         arg_str="--use_msa false --batch_size 2 --sample_diffusion.N_sample 3"
     )
     cfg.seeds = []
+    cfg.infer_setting.batch_max_padding_ratio = padding_ratio
     sampler = InferenceJobSampler(jobs, rank=rank, num_replicas=world_size)
 
     class Loader:
@@ -170,3 +177,46 @@ def test_scheduler_shards_jobs_and_skips_padding_on_empty_ranks(monkeypatch):
         ("job1", 101),
         ("job2", 102),
     ]
+
+
+def test_padding_limit_splits_without_losing_job_seeds(monkeypatch):
+    calls, written, reports = _run_scheduler(monkeypatch, padding_ratio=1.0)
+    assert all(len(call) == 1 for call in calls)
+    assert sorted(written) == [
+        ("job0", 101),
+        ("job0", 102),
+        ("job1", 101),
+        ("job2", 102),
+    ]
+    assert not reports
+
+
+@pytest.mark.parametrize(
+    "sizes,ratio,budget,expected",
+    [
+        ([(5, 10)], 1.0, 1, False),
+        ([(5, 10), (5, 10)], 1.0, 0, False),
+        ([(5, 10), (5, 11)], 1.0, 0, True),
+        ([(4, 10), (5, 10)], 1.0, 0, True),
+        ([(5, 10), (5, 10)], 0.0, 199, True),
+        ([(5, 10), (5, 10)], 0.0, 200, False),
+    ],
+)
+def test_batch_limits_cover_both_token_spaces(sizes, ratio, budget, expected):
+    settings = SimpleNamespace(
+        batch_max_padding_ratio=ratio, batch_max_pair_tokens=budget
+    )
+    assert batched_prediction._exceeds_batch_budget(sizes, settings) is expected
+
+
+@pytest.mark.parametrize("ratio", [-1, 0.5, float("inf"), float("nan")])
+def test_invalid_padding_limits_fail_before_model_loading(monkeypatch, ratio):
+    from runner.batch_inference import get_default_runner
+
+    monkeypatch.setattr(
+        inference.InferenceRunner,
+        "__init__",
+        lambda *a, **k: pytest.fail("loaded model"),
+    )
+    with pytest.raises(ValueError):
+        get_default_runner(use_msa=False, batch_size=2, batch_max_padding_ratio=ratio)

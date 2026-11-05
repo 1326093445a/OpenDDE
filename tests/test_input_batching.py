@@ -371,3 +371,25 @@ def test_new_diffusion_reuse_preserves_five_samples_across_requests(sample_chunk
                         torch.testing.assert_close(
                             observed[key], reference[key], atol=2e-5, rtol=2e-5
                         )
+
+
+def test_singleton_batch_uses_cached_native_path():
+    from opendde.model.opendde import OpenDDE
+
+    cfg = _toy_config()
+    cfg.enable_diffusion_shared_vars_cache = True
+    cfg.enable_efficient_fusion = True
+    model = OpenDDE(cfg).eval()
+    feat = _toy_features(4, 101)
+    seen = []
+    hook = model.pairformer_stack.register_forward_pre_hook(
+        lambda m, args, kw: seen.append(kw["s"].shape[0]), with_kwargs=True
+    )
+    with torch.no_grad():
+        first = model.forward_batch([copy.deepcopy(feat)])
+        second = model.forward_batch([copy.deepcopy(feat)])
+    hook.remove()
+    assert seen and set(seen) == {1}
+    torch.testing.assert_close(
+        first[0]["coordinate"], second[0]["coordinate"], rtol=0, atol=0
+    )

@@ -26,6 +26,9 @@ INFERENCE_DEVICE_CHOICES: tuple[InferenceDevice, ...] = (
     "mps",
 )
 TriangleKernel = Literal["auto", "cuequivariance", "torch"]
+TriangleMultiplicativeKernel = Literal[
+    "auto", "cuequivariance", "torch", "flashpairformer"
+]
 
 
 class BaseConfig(BaseModel):
@@ -164,6 +167,8 @@ class InferSettingConfig(BaseConfig):
     chunk_size_thresholds: dict[str, int]
     sample_diffusion_chunk_size: Optional[int]
     confidence_sample_chunk_size: Optional[int] = 1
+    batch_max_padding_ratio: float = Field(default=0.0, ge=0, allow_inf_nan=False)
+    batch_max_pair_tokens: int = Field(default=0, ge=0)
     diffusion_cache_max_mb: int = Field(default=2048, ge=0)
     share_diffusion_sample_conditioning: bool = True
     diffusion_attention_backend: Literal["reference", "efficient"] = "reference"
@@ -332,7 +337,7 @@ class OpenDDEConfig(BaseConfig):
     sigma_data: float
     blocks_per_ckpt: Optional[int]
     hidden_scale_up: bool
-    triangle_multiplicative: TriangleKernel
+    triangle_multiplicative: TriangleMultiplicativeKernel
     triangle_attention: TriangleKernel
     enable_diffusion_shared_vars_cache: bool
     enable_efficient_fusion: bool

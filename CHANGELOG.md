@@ -4,7 +4,28 @@ User-facing changes to OpenDDE are documented here.
 
 ## [Unreleased]
 
-No changes yet.
+- Added opt-in `--trimul_kernel flashpairformer` for exact-mode TMK3 triangle
+  multiplication, with an optional opt_core dependency, packed-weight cache
+  invalidation, and explicit fallback counts. Default kernels and precision
+  are unchanged; distributed Fold-CP rejects this backend.
+
+- Stabilized ordinary CUDA atom-to-token sum/mean inference with ordered
+  reductions. This can change historical predictions; it does not guarantee
+  identical results across different padding shapes or kernels.
+- Native singleton batches now use projection caches and the batched sampler.
+  The legacy `--batch_size 1` CLI path is unchanged. Added optional
+  `--batch_max_padding_ratio` and `--batch_max_pair_tokens` scheduling limits,
+  checked on both residue and structural-token sizes.
+- Added per-job `ipsae_interface` selection for two groups of protein chains,
+  including summary-only output and CIF-label conversion.
+- Extended optional efficient diffusion attention to flatten compatible axes
+  without copying shared pair biases. The default remains `reference`.
+- Added real-input FP32/BF16 benchmarks, singleton-versus-pair measurements,
+  padding controls and repeatability checks. BF16 is still the default;
+  the benchmark now matches it and records interpreter/Torch paths. BF16
+  predictions can change substantially relative to the previous reduction
+  and singleton execution; see
+  [the optimization report](docs/batched_inference_optimizations.md).
 
 ## [1.2.0] - 2026-10-09
 

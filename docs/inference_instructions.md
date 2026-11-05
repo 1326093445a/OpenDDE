@@ -288,6 +288,9 @@ CUDA_VISIBLE_DEVICES=0,1 LAYERNORM_TYPE=torch \
   --foldcp_mode single --batch_size 2 --sample 3
 ```
 
+For padding limits, optimized singleton groups and validation results, see
+[the inference optimization report](batched_inference_optimizations.md).
+
 Each worker owns a disjoint subset of jobs and batches locally. This mode
 requires no MSA/templates/RNA MSA, no TFG guidance, `foldcp_mode=single`,
 `num_workers=0`, and `model.N_model_seed=1`; multiple per-job `modelSeeds` are

@@ -358,6 +358,13 @@ class DataDumper:
                     }
                     for pair in summary["ipsae_chain_pairs"]
                 ]
+                if "ipsae_interface" in summary:
+                    selected = summary["ipsae_interface"]
+                    summary["ipsae_interface"] = {
+                        **selected,
+                        "chains_1": [labels[x] for x in selected["chains_1"]],
+                        "chains_2": [labels[x] for x in selected["chains_2"]],
+                    }
                 summary["ipsae_parameters"] = {
                     key: value
                     for key, value in summary["ipsae_parameters"].items()

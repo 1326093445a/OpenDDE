@@ -2,6 +2,7 @@
 # Copyright (c) 2026 Aureka AI Research
 import copy
 import logging
+import math
 import os
 from collections.abc import Mapping
 from typing import Any, Optional
@@ -21,6 +22,7 @@ from opendde.utils.environment import (
 )
 
 TRIANGLE_KERNELS = ("auto", "cuequivariance", "torch")
+TRIANGLE_MULTIPLICATIVE_KERNELS = (*TRIANGLE_KERNELS, "flashpairformer")
 logger = logging.getLogger(__name__)
 
 
@@ -90,9 +92,9 @@ def validate_triangle_kernels(
     triangle_multiplicative: str, triangle_attention: str
 ) -> None:
     """Validate triangle kernel names used by inference."""
-    if triangle_multiplicative not in TRIANGLE_KERNELS:
+    if triangle_multiplicative not in TRIANGLE_MULTIPLICATIVE_KERNELS:
         raise ValueError(
-            "Invalid triangle_multiplicative. Options: 'auto', 'cuequivariance', 'torch'."
+            "Invalid triangle_multiplicative. Options: 'auto', 'cuequivariance', 'torch', 'flashpairformer'."
         )
     if triangle_attention not in TRIANGLE_KERNELS:
         raise ValueError(
@@ -114,6 +116,16 @@ def validate_input_batching(
     size = getattr(configs, "batch_size", 1) if batch_size is None else batch_size
     if size < 1:
         raise ValueError("batch_size must be at least 1.")
+    ratio = configs.infer_setting.batch_max_padding_ratio
+    if not math.isfinite(ratio) or ratio < 0 or 0 < ratio < 1:
+        raise ValueError("batch_max_padding_ratio must be zero (disabled) or >= 1")
+    pair_budget = configs.infer_setting.batch_max_pair_tokens
+    if (
+        isinstance(pair_budget, bool)
+        or not isinstance(pair_budget, int)
+        or pair_budget < 0
+    ):
+        raise ValueError("batch_max_pair_tokens must be a nonnegative integer")
     if size == 1:
         return
     incompatible = []
@@ -221,7 +233,7 @@ def validate_triangle_kernel_runtime(
     configs: OpenDDEConfig,
     runtime_status: CuEquivarianceRuntimeStatus,
 ) -> None:
-    if "cuequivariance" not in {
+    if not {"cuequivariance", "flashpairformer"} & {
         configs.triangle_multiplicative,
         configs.triangle_attention,
     }:
@@ -248,6 +260,11 @@ def apply_runtime_compatibility(
     # that backend is unsupported.  That silently changed P=1/P>1 numerics and
     # could enter an unsupported collective/kernel combination.
     if getattr(configs, "foldcp_mode", "single") == "distributed":
+        if configs.triangle_multiplicative == "flashpairformer":
+            raise ValueError(
+                "Distributed 1 x P Fold-CP does not support FlashPairformer "
+                "triangle multiplication. Use --trimul_kernel torch --triatt_kernel torch."
+            )
         explicit_cueq = {
             configs.triangle_multiplicative,
             configs.triangle_attention,

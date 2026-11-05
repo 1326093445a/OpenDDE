@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2026 Aureka AI Research
 # Copyright 2021 AlQuraishi Laboratory
+# FlashPairformer integration adapted from Mol-1, Copyright 2026 Molence Bio.
 
 
 from abc import ABC, abstractmethod
@@ -109,6 +110,18 @@ class BaseTriangleMultiplicativeUpdate(nn.Module, ABC):
         self.layer_norm_out = LayerNorm(self.c_hidden)
 
         self.sigmoid = nn.Sigmoid()
+
+    def _load_from_state_dict(self, *args, **kwargs):
+        from .flashpairformer import clear_flashpairformer_cache
+
+        clear_flashpairformer_cache(self)
+        return super()._load_from_state_dict(*args, **kwargs)
+
+    def _apply(self, *args, **kwargs):
+        from .flashpairformer import clear_flashpairformer_cache
+
+        clear_flashpairformer_cache(self)
+        return super()._apply(*args, **kwargs)
 
     def _combine_projections(
         self,
@@ -474,11 +487,25 @@ class TriangleMultiplicativeUpdate(BaseTriangleMultiplicativeUpdate):
         Returns:
             [*, N_res, N_res, C_z] output tensor
         """
-        if triangle_multiplicative not in {"torch", "cuequivariance"}:
+        if triangle_multiplicative not in {
+            "torch",
+            "cuequivariance",
+            "flashpairformer",
+        }:
             raise ValueError(
-                "triangle_multiplicative must be 'cuequivariance' or 'torch', "
+                "triangle_multiplicative must be 'cuequivariance', 'flashpairformer' or 'torch', "
                 f"but got {triangle_multiplicative}"
             )
+
+        if triangle_multiplicative == "flashpairformer":
+            from .flashpairformer import triangle_multiplication
+
+            update = triangle_multiplication(self, z, mask)
+            if update is not None:
+                return (
+                    update + z if inplace_safe is True and _add_with_inplace else update
+                )
+            triangle_multiplicative = "cuequivariance" if z.is_cuda else "torch"
 
         use_cuequivariance = (
             triangle_multiplicative == "cuequivariance"

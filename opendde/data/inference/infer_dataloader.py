@@ -20,6 +20,7 @@ from opendde.data.msa.msa_featurizer import InferenceMSAFeaturizer
 from opendde.data.template.template_featurizer import InferenceTemplateFeaturizer
 from opendde.data.template.template_utils import TemplateHitFeaturizer
 from opendde.data.utils import data_type_transform, make_dummy_feature
+from opendde.metrics.ipsae import protein_token_groups, validate_ipsae_interface
 from opendde.utils.distributed import DIST_WRAPPER
 from opendde.utils.torch_utils import collate_fn_identity, dict_to_tensor
 
@@ -281,6 +282,23 @@ class InferenceDataset(Dataset):
         # Add dimension related items
         N_token = feat["token_index"].shape[0]
         N_atom = feat["atom_to_token_idx"].shape[0]
+        interface = single_sample_dict.get("ipsae_interface")
+        if interface is not None:
+            groups = protein_token_groups(
+                atom_array, feat["atom_to_token_idx"], N_token
+            )
+            interface = validate_ipsae_interface(interface, groups)
+            chain_to_asym = {
+                str(chain): str(asym)
+                for chain, asym in zip(atom_array.chain_id, atom_array.asym_id_int)
+            }
+            # Scoring uses public residue PAE axes and model asym IDs. The
+            # writer translates selected labels along with the chain pairs.
+            feat["ipsae_interface"] = [
+                [chain_to_asym[chain] for chain in side] for side in interface
+            ]
+            data["ipsae_interface"] = interface
+
         N_msa = feat["msa"].shape[0]
         stats = {}
         for mol_type in ["ligand", "protein", "dna", "rna"]:

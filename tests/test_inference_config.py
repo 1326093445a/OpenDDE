@@ -243,6 +243,9 @@ def test_runner_run_config_build_does_not_mutate_base_defaults(monkeypatch):
 def test_validate_triangle_kernels_rejects_unknown_values():
     validate_triangle_kernels("auto", "cuequivariance")
     validate_triangle_kernels("torch", "cuequivariance")
+    validate_triangle_kernels("flashpairformer", "cuequivariance")
+    with pytest.raises(ValueError, match="triangle_attention"):
+        validate_triangle_kernels("torch", "flashpairformer")
     with pytest.raises(ValueError):
         validate_triangle_kernels("unsupported", "torch")
     with pytest.raises(ValueError):
@@ -392,6 +395,31 @@ def test_explicit_cuequivariance_reports_runtime_reason():
 
     with pytest.raises(RuntimeError, match="supported only on Linux x86_64"):
         validate_triangle_kernel_runtime(cfg, status)
+
+
+def test_flashpairformer_requires_cueq_for_cuda_fallbacks():
+    cfg = build_inference_config(
+        arg_str="--triangle_multiplicative flashpairformer --triangle_attention torch",
+        fill_required_with_null=True,
+    )
+    with pytest.raises(RuntimeError, match="missing"):
+        validate_triangle_kernel_runtime(cfg, _runtime_status("cuEquivariance missing"))
+
+
+def test_distributed_flashpairformer_is_rejected_before_probing(monkeypatch):
+    import opendde.config.inference as inference_config
+
+    cfg = build_inference_config(fill_required_with_null=True)
+    cfg.foldcp_mode = "distributed"
+    cfg.triangle_multiplicative = "flashpairformer"
+    cfg.triangle_attention = "torch"
+    monkeypatch.setattr(
+        inference_config,
+        "get_cuequivariance_runtime_status",
+        lambda *args, **kwargs: pytest.fail("must reject before package probing"),
+    )
+    with pytest.raises(ValueError, match="does not support FlashPairformer"):
+        apply_runtime_compatibility(cfg, torch.device("cuda:0"))
 
 
 def test_distributed_auto_triangle_kernels_resolve_to_torch(monkeypatch):

@@ -64,6 +64,31 @@ def _precision_bucket(n_token: int) -> int:
     return 0 if n_token <= 2560 else 1 if n_token <= 3840 else 2
 
 
+def _batch_token_sizes(data):
+    """Track both residue-trunk and expanded structural-token work."""
+    features = data["input_feature_dict"]
+    residue = int(data["N_token"].item())
+    parent = features.get("parent_residue_idx")
+    return residue, parent.numel() if parent is not None else residue
+
+
+def _exceeds_batch_budget(sizes, settings):
+    if len(sizes) < 2:
+        return False
+    for lengths in zip(*sizes, strict=True):
+        maximum = max(lengths)
+        if (
+            settings.batch_max_pair_tokens
+            and len(lengths) * maximum**2 > settings.batch_max_pair_tokens
+        ):
+            return True
+        if settings.batch_max_padding_ratio and len(
+            lengths
+        ) * maximum**3 > settings.batch_max_padding_ratio * sum(n**3 for n in lengths):
+            return True
+    return False
+
+
 def infer_predict_batched(runner, configs) -> None:
     from runner.inference import (
         _append_error_report,
@@ -205,7 +230,11 @@ def infer_predict_batched(runner, configs) -> None:
             if not owned:
                 continue
             current = _precision_bucket(int(data["N_token"].item()))
-            if pending and current != bucket:
+            sizes = [_batch_token_sizes(item[0]) for item in pending]
+            sizes.append(_batch_token_sizes(data))
+            if pending and (
+                current != bucket or _exceeds_batch_budget(sizes, configs.infer_setting)
+            ):
                 predict(pending)
                 pending = []
             bucket = current

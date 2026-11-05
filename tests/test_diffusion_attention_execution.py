@@ -196,3 +196,24 @@ def test_eight_job_cuda_model_keeps_sample_and_atom_ownership(sample_chunk):
         for key in ("coordinate", "plddt", "pae", "pde", "resolved"):
             torch.testing.assert_close(observed[key], wanted[key], atol=5e-4, rtol=2e-4)
         assert len(observed["summary_confidence"]) == 5
+
+
+@pytest.mark.parametrize("shared", [False, True])
+def test_layout_does_not_materialize_shared_pair_bias(monkeypatch, shared):
+    q = torch.randn(2, 3, 4, 7, 16)
+    bias = torch.randn(2, 1 if shared else 3, 4, 7, 7)
+    original = F.scaled_dot_product_attention
+    calls = []
+
+    def observe(query, key, value, *, attn_mask, scale):
+        assert (
+            attn_mask.untyped_storage().data_ptr() == bias.untyped_storage().data_ptr()
+        )
+        calls.append(query.shape)
+        return original(query, key, value, attn_mask=attn_mask, scale=scale)
+
+    monkeypatch.setattr(F, "scaled_dot_product_attention", observe)
+    actual = _attention_supported_layout(q, q, q, bias)
+    expected = original(q, q, q, attn_mask=bias, scale=1.0)
+    torch.testing.assert_close(actual, expected)
+    assert len(calls) == (2 if shared else 1)

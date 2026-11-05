@@ -276,3 +276,29 @@ guidance, which runs by default when the input carries it (see
 
 The summary JSON includes confidence metrics such as `plddt`, `gpde`, `ptm`,
 `iptm`, clash flags, and `ranking_score` when available.
+
+
+## ipSAE interface selection
+
+A job can select two disjoint groups of protein chains using the CIF chain
+labels that OpenDDE writes:
+
+```json
+"ipsae_interface": [["A"], ["B", "C"]]
+```
+
+This pools the protein CA tokens on each side before counting partners and
+computing ipSAE; it is not an average of the individual chain-pair scores.
+Unlisted chains and pairs within a side do not enter the selected score.
+The selected `ipsae_min_10` and `ipsae_min_10_d0ref` appear in every sample's
+summary, with directional scores and the selected labels in `ipsae_interface`.
+All individual `ipsae_chain_pairs` records remain available. Prediction
+coordinates and ranking are unaffected by the selection.
+
+Selections are checked during feature preparation: both sides must be nonempty,
+labels must be unique and disjoint, and every label must have protein CA tokens.
+Ligands and nucleic acids cannot be selected. With no selection, existing behavior
+is preserved: exactly two protein chains get a top-level scalar, otherwise it
+is null. Full confidence JSON is not required. Direct model callers use string
+asym IDs in the feature dictionary's `ipsae_interface`; the normal JSON loader
+converts CIF labels to these IDs and the writer converts them back.

@@ -1,0 +1,291 @@
+# Copyright 2026 Molence Bio
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#      http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+"""Optional FlashPairformer TMK3 integration, without upstream model patches.
+
+The adapter reuses parameters registered on the model without changing
+checkpoint keys. Packed inference weights are invalidated when parameters
+change, a checkpoint is loaded, or a module changes device.
+"""
+
+import importlib
+import logging
+import math
+import os
+import sys
+from collections import Counter
+
+import torch
+
+logger = logging.getLogger(__name__)
+_REPORTED = set()
+
+
+def _import_trimul():
+    """Import ``opt_core.kernels.trimul``, honouring ``OPT_CORE_DIR``.
+
+    ``opt_core`` may be installed at the revision documented in docs/kernels.md,
+    or ``OPT_CORE_DIR`` may point to the directory containing its package.
+    Resolve it lazily so CPU and ordinary cuEquivariance imports stay optional.
+    """
+    try:
+        return importlib.import_module("opt_core.kernels.trimul")
+    except ImportError:
+        source_root = os.environ.get("OPT_CORE_DIR")
+        if not source_root or not os.path.isdir(source_root):
+            raise
+        if source_root not in sys.path:
+            sys.path.append(source_root)
+        importlib.invalidate_caches()
+        return importlib.import_module("opt_core.kernels.trimul")
+
+
+def clear_flashpairformer_cache(model):
+    """Release packed weights after external ``parameter.data`` modifications.
+
+    Ordinary load_state_dict(), copy_(), and device/dtype moves are handled
+    automatically. This helper also lets long-lived workers release the cache.
+    """
+    for module in model.modules():
+        module.__dict__.pop("_flashpairformer_cache", None)
+        module.__dict__.pop("_flashpairformer_signature", None)
+
+
+def flashpairformer_stats(model):
+    """Aggregate served/fallback counts; no tensors or checkpoint state."""
+    counts = Counter()
+    for module in model.modules():
+        counts.update(getattr(module, "_flashpairformer_stats", {}))
+    return dict(counts)
+
+
+def _record(module, reason):
+    counts = module.__dict__.setdefault("_flashpairformer_stats", Counter())
+    counts[reason] += 1
+    if reason not in _REPORTED:
+        _REPORTED.add(reason)
+        logger.info("FlashPairformer triangle multiplication: %s", reason)
+
+
+def _weights(module):
+    return {
+        "ln_in_w": module.layer_norm_in.weight,
+        "ln_in_b": module.layer_norm_in.bias,
+        "w_ag": module.linear_a_g.weight,
+        "w_ap": module.linear_a_p.weight,
+        "w_bg": module.linear_b_g.weight,
+        "w_bp": module.linear_b_p.weight,
+        "ln_out_w": module.layer_norm_out.weight,
+        "ln_out_b": module.layer_norm_out.bias,
+        "w_o": module.linear_z.weight,
+        "w_og": module.linear_g.weight,
+    }
+
+
+def _version(tensor):
+    try:
+        return tensor._version
+    except RuntimeError:  # Parameters created inside inference_mode have no counter.
+        return None
+
+
+def _weight_cache(module, weights, compute_dtype):
+    # Upstream's pack key omits version counters and several parameters. Check
+    # every parameter here: model-merging workers reload tensors in place.
+    signature = (
+        compute_dtype,
+        tuple(
+            (
+                name,
+                id(t),
+                t.data_ptr(),
+                _version(t),
+                tuple(t.shape),
+                tuple(t.stride()),
+                t.dtype,
+                t.device,
+            )
+            for name, t in weights.items()
+        ),
+    )
+    # Parameters created inside inference_mode have no version counter. Their
+    # in-place updates cannot be detected, so never reuse a pack for them.
+    unversioned = any(entry[3] is None for entry in signature[1])
+    if unversioned or module.__dict__.get("_flashpairformer_signature") != signature:
+        module._flashpairformer_cache = {}
+        module._flashpairformer_signature = signature
+    return module._flashpairformer_cache
+
+
+def _tmk3_with_fitted_tiles(
+    trimul,
+    z,
+    mask,
+    weights,
+    cache,
+    compute_dtype,
+    *,
+    direction,
+    eps,
+):
+    """Serve widths such as 320/448 using legal TMK3 channel tiles.
+
+    The pinned opt_core selector inherits 128-wide output tiles from C=256.
+    Its fit_cfg clamps tiles to C but does not make them divisors of C, so
+    these Mol-1 widths assert on Hopper. Use the same exact-mode kernels and
+    weight layout with fitted tiles, without changing upstream global state.
+    The public triangle_multiplication config argument does not reach TMK3.
+    """
+    kernels = importlib.import_module("opt_core.kernels.fpf_trimul.kernels")
+    selector = importlib.import_module("opt_core.kernels.fpf_trimul.trimul")
+    n, _, c = z.shape
+    cfg = kernels.fit_cfg(trimul.tmk3_cfg(selector, "exact", compute_dtype, n, c), c)
+    projection_width = (4 if cfg["A"].get("v", 2) == 14 else 2) * c
+    for stage, output_width in (("A", projection_width), ("C", c)):
+        cfg[stage]["BN"] = math.gcd(cfg[stage]["BN"], output_width)
+        cfg[stage]["BK"] = math.gcd(cfg[stage]["BK"], c)
+    if kernels.launch_grid_y(n, c, cfg) > kernels.CUDA_GRID_Y_MAX:
+        raise trimul.Refusal("launch_grid_y>65535", "tmk3_exact", "cueq")
+
+    packed = cache.get("opendde_tmk3_weights")
+    if packed is None:
+        # _weight_cache invalidates this after weight/dtype/device changes.
+        def compute(tensor):
+            return tensor.detach().to(compute_dtype).contiguous()
+
+        packed = kernels.pack_weights(
+            weights["ln_in_w"].detach().contiguous(),
+            weights["ln_in_b"].detach().contiguous(),
+            compute(torch.cat([weights["w_ap"], weights["w_bp"]], 0)),
+            compute(torch.cat([weights["w_ag"], weights["w_bg"]], 0)),
+            weights["ln_out_w"].detach().contiguous(),
+            weights["ln_out_b"].detach().contiguous(),
+            compute(weights["w_o"]),
+            compute(weights["w_og"]),
+        )
+        cache["opendde_tmk3_weights"] = packed
+    return kernels.trimul_forward(
+        z.contiguous(),
+        direction,
+        mask,
+        packed,
+        eps=eps,
+        residual=False,
+        cfg=cfg,
+        contract="cublas",
+        cdt=compute_dtype,
+    )
+
+
+def triangle_multiplication(module, z, mask=None):
+    """Return the BF16 update, or None to use OpenDDE's stock backend.
+
+    No residual is fused: the caller preserves stock residual addition and its
+    dtype, including FP32-resident pairs under BF16 autocast. Grad-enabled or
+    training calls use the differentiable stock path. Runtime kernel errors
+    propagate; only explicit upstream support refusals fall back.
+    """
+    if module.training or torch.is_grad_enabled():
+        clear_flashpairformer_cache(module)
+        _record(module, "fallback:autograd_or_training")
+        return None
+    if z.ndim > 3 and z.shape[-3] == z.shape[-2]:
+        if mask is not None and (mask.shape != z.shape[:-1] or mask.device != z.device):
+            _record(module, "fallback:unsupported_mask_layout")
+            return None
+        # TMK3 operates on one square pair at a time. Preserve the independent
+        # input/sample axes while reusing the packed module weights.
+        flat_z = z.reshape(-1, *z.shape[-3:])
+        flat_mask = None if mask is None else mask.reshape(-1, *mask.shape[-2:])
+        updates = []
+        for i, pair in enumerate(flat_z):
+            update = triangle_multiplication(
+                module, pair, None if flat_mask is None else flat_mask[i]
+            )
+            if update is None:
+                return None
+            updates.append(update)
+        return torch.stack(updates).reshape(z.shape)
+    compute_dtype = (
+        torch.get_autocast_dtype("cuda")
+        if z.is_cuda and torch.is_autocast_enabled("cuda")
+        else module.linear_a_p.weight.dtype
+    )
+    reason = None
+    if not z.is_cuda:
+        reason = "cpu"
+    elif compute_dtype != torch.bfloat16 or z.dtype not in (
+        torch.bfloat16,
+        torch.float32,
+    ):
+        reason = "requires_bf16_compute"
+    elif z.ndim != 3 or z.shape[-3] != z.shape[-2]:
+        reason = "requires_single_square_pair"
+    elif module.c_z != module.c_hidden or module.c_z % 64:
+        reason = "unsupported_channels"
+    elif mask is not None and (mask.shape != z.shape[:-1] or mask.device != z.device):
+        reason = "unsupported_mask_layout"
+    if reason is not None:
+        _record(module, "fallback:" + reason)
+        return None
+
+    # cuEq uses a different Torch implementation for short sequences. TMK3
+    # reproduces its fused implementation, so preserve this stock dispatch too.
+    cueq = importlib.import_module(
+        "cuequivariance_ops_torch.triangle_multiplicative_update"
+    )
+    threshold = max(100, getattr(cueq, "CUEQ_TRIMUL_FALLBACK_THRESHOLD", 100))
+    if z.shape[-2] <= threshold:
+        _record(module, "fallback:cueq_short_sequence")
+        return None
+
+    try:
+        trimul = _import_trimul()
+    except ImportError as exc:
+        raise RuntimeError(
+            "triangle_multiplicative=flashpairformer requires Anthropic opt_core. "
+            "Install the pinned dependency from docs/kernels.md, or point "
+            "OPT_CORE_DIR at a source checkout of it; see docs/kernels.md."
+        ) from exc
+    weights = _weights(module)
+    cache = _weight_cache(module, weights, compute_dtype)
+    try:
+        direction = "outgoing" if module._outgoing else "incoming"
+        if module.c_z > 128 and module.c_z % 128:
+            update = _tmk3_with_fitted_tiles(
+                trimul,
+                z,
+                mask,
+                weights,
+                cache,
+                compute_dtype,
+                direction=direction,
+                eps=module.layer_norm_in.eps,
+            )
+        else:
+            update = trimul.triangle_multiplication(
+                z,
+                mask,
+                direction=direction,
+                weights=weights,
+                word="tmk3_exact",
+                residual=False,
+                cache=cache,
+                eps=module.layer_norm_in.eps,
+            )
+    except trimul.Refusal as exc:
+        _record(module, "fallback:upstream_refusal:" + str(exc))
+        return None
+    _record(module, "tmk3_exact")
+    return update

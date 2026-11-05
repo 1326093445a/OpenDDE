@@ -56,6 +56,10 @@ dependencies = [
 
 [project.optional-dependencies]
 cpu = []
+# opt_core is not on PyPI. Install the pinned source/wheel first; see docs/kernels.md.
+flashpairformer = [
+  "opt_core==0.5.228.0; platform_system == 'Linux' and platform_machine == 'x86_64'",
+]
 gpu = [
   "triton==3.3.1; platform_system == 'Linux' and platform_machine == 'x86_64'",
   "cuequivariance==0.10.0; platform_system == 'Linux' and platform_machine == 'x86_64'",

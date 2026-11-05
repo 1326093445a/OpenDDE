@@ -304,6 +304,28 @@ def _attention_supported_layout(q, k, v, attn_bias):
             else attn_bias
         )
         return run(q.unsqueeze(1), k.unsqueeze(1), v.unsqueeze(1), bias).squeeze(1)
+    # Flatten independent leading axes only when a shared bias stays a view.
+    # Expanding a [B, 1, H, Q, K] bias then reshaping would copy it per sample.
+    if q.ndim >= 4 and q.shape[:-2] == k.shape[:-2] == v.shape[:-2]:
+        flat_bias = attn_bias
+        can_flatten = attn_bias is None or attn_bias.ndim <= 3
+        if attn_bias is not None and 3 < attn_bias.ndim <= q.ndim:
+            bias_shape = (1,) * (q.ndim - attn_bias.ndim) + attn_bias.shape
+            prefix = bias_shape[:-3]
+            if prefix == q.shape[:-3] or all(n == 1 for n in prefix):
+                try:
+                    flat_bias = attn_bias.view(-1, *bias_shape[-3:])
+                    can_flatten = True
+                except RuntimeError:
+                    pass
+        if can_flatten:
+            output = run(
+                q.reshape(-1, *q.shape[-3:]),
+                k.reshape(-1, *k.shape[-3:]),
+                v.reshape(-1, *v.shape[-3:]),
+                flat_bias,
+            )
+            return output.reshape(*q.shape[:-1], v.shape[-1])
     if (
         q.ndim == k.ndim == v.ndim == 5
         and k.shape[0] in (1, q.shape[0])

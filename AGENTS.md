@@ -71,7 +71,7 @@ python -m pytest tests -q -m "not network"
 - Input JSON details live in `docs/infer_json_format.md`; top level is a job list with entities such as `proteinChain`, `dnaSequence`, `rnaSequence`, `ligand`, `ion`, plus `covalent_bonds`.
 - MSA/template/RNA-MSA preprocessing may need network access, large databases, HMMER/Kalign binaries, and Docker/GPU-specific setup. Do not assume they exist locally.
 - CCD/ligand/SMILES/SDF/MOL/PDB paths depend on RDKit, Biotite, Gemmi, and PDBe CCD data; cover residues, modifications, ions, ligands, and covalent-bond edge cases when changing them.
-- Triangle kernels are `auto`, `cuequivariance`, or `torch`; always preserve PyTorch fallback.
+- Triangle kernels are `auto`, `cuequivariance`, or `torch`; multiplication also accepts optional `flashpairformer` (TMK3). Always preserve PyTorch fallback. Distributed Fold-CP requires `torch`.
 - `LAYERNORM_TYPE=torch` is the safe default. `fast_layernorm` is optional CUDA/JIT behavior and must fail softly.
 
 ## Handoff checklist
