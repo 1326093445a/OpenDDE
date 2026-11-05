@@ -31,10 +31,10 @@ including confidence splits and mappings, and repeated exactly. Each batch
 served 256 TMK3 calls with 16 FP32 fallbacks. This reduced-step check validates
 mixed-length execution, not production throughput or eight-input capacity.
 
-GPU 7 was initially free but another job appeared before the end-to-end
-measurements. Those timings are excluded from speed claims. The supplied
+GPU 7 was initially free but another job appeared before the first end-to-end
+measurements. Those initial timings are excluded from speed claims. The supplied
 shared-GPU width-384 kernel ratio is therefore not an OpenDDE end-to-end
-speedup. Clean throughput measurement remains necessary. The installed
+speedup. A subsequent clean comparison is reported below. The installed
 cuEquivariance Hopper tuning table for its fused dual-projection forward
 kernel contains `(N,K)` width pairs `(128,128)` and `(256,128)`, not width
 384; this motivates an isolated on-demand-tuning experiment without proving
@@ -48,6 +48,60 @@ and matched default cuEquivariance **bitwise in both directions**. Each case
 used a separate fixed seed because tuning can consume random state. This
 establishes compatibility and parity for the tested shapes, not a speedup:
 the GPU was shared, and no production tuning cache or default was changed.
+
+### Matched whole-model kernel comparison
+
+A subsequent session used an otherwise idle H200 with the model code preserved
+in commit `2b9c32a`. It ran complete **7r6r, 245 tokens, BF16, no MSA, ten
+recycles, 200 steps and one sample**, using a native singleton, reference
+diffusion attention, cuEquivariance triangle attention and TF32 disabled.
+Torch 2.7.1+cu126, Triton 3.3.1 and the released checkpoint were unchanged.
+
+A fresh isolated cuEquivariance cache was prepared by running the complete
+workload with `CUEQ_TRITON_TUNING=ONDEMAND`. Its first forward took **392.33 s**,
+including tuning and inference. Tuning was disabled for all measured runs;
+the tuned variant read that prepared cache. Default cuEquivariance and TMK3
+used a separate untuned cache, including TMK3's eight FP32 confidence fallbacks.
+
+The measured process order was **default, TMK3, tuned, tuned, TMK3, default**.
+Each process received one warmup and three measured forwards, giving six
+measurements per variant. All model/runner source hashes matched. Continuous
+GPU-process sampling produced **660 samples over the session**, with no
+competing process detected on the target GPU; other GPUs remained busy.
+Model loading, featurization, JIT/tuning setup and output writing are excluded
+from measured `predict_batch` time.
+
+| Triangle multiplication | Median | Measured range | Reduction vs default | Peak allocated memory |
+| --- | ---: | ---: | ---: | ---: |
+| Default cuEquivariance | 8.006 s | 7.974–8.022 s | — | 5.158 GiB |
+| TMK3 (`flashpairformer`) | 7.605 s | 7.585–7.660 s | 5.01% | 5.472 GiB |
+| Tuned cuEquivariance | 7.636 s | 7.513–7.706 s | 4.62% | 5.158 GiB |
+
+TMK3's median lead over tuned cuEquivariance is only **0.031 s (0.41%)**,
+smaller than the observed timing variation. This does **not** establish a
+decisive end-to-end winner or the anticipated double-digit gain. The earlier
+isolated 640-token kernel ratio cannot be transferred to this 245-token
+whole-model workload.
+
+TMK3 matched all default predictions bitwise. Tuned cuEquivariance preserved
+coordinates and ranking exactly but changed 11 confidence-related fields at
+small FP32 rounding scales: expected PAE differed by at most **0.00000954 A**,
+and raw confidence logits by at most **0.00000287**. Each variant repeated
+bitwise, including across its two processes. The isolated BF16 kernel parity
+check above did not cover every FP32 confidence kernel tuned by this full run.
+
+**Recommendation:** retain `auto` as the general default. On this tested H200
+workload, either option provides a modest improvement. TMK3 is an opt-in choice
+when retaining default numerics and avoiding on-demand tuning setup matter;
+it needs opt_core and about 0.31 GiB more allocated memory here. A warmed
+cuEquivariance cache provides similar steady-state speed without opt_core.
+Neither result establishes the best choice for larger complexes, unseen
+lengths, eight-input batches or multi-GPU throughput.
+
+To measure the tuned alternative, first run the complete workload once with
+`CUEQ_TRITON_TUNING=ONDEMAND CUEQ_TRITON_CACHE_DIR=/path/to/separate/cache`,
+then unset `CUEQ_TRITON_TUNING` and repeat with the same cache directory.
+Measure new shapes separately; cache preparation is not free inference time.
 
 ```bash
 python scripts/benchmark_inference.py --input examples/cofold/example.json \
@@ -329,9 +383,8 @@ forward. The unequal-length comparison above and Mol-1's pairing result do
 not establish the best BF16 grouping for every OpenDDE workload.
 With one sample, confidence chunking cannot reduce sample-loop work, but the
 200 diffusion steps still contain attention and projection costs. Remaining
-optimization opportunities are not limited to the trunk. TMK3 compatibility
-and numerical validation are reported above; clean end-to-end timing remains
-pending.
+optimization opportunities are not limited to the trunk. TMK3 compatibility,
+numerical validation and the matched whole-model comparison are reported above.
 
 The following sections retain earlier implementation details and measurements;
 their five-sample synthetic timings are separate from this one-sample real-input

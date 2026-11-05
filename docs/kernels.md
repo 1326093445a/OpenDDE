@@ -128,8 +128,13 @@ may spend minutes tuning; measure subsequent warmed passes separately. Keep
 this opt-in and compare output numerics as well as timing. No tuning variable
 is enabled by OpenDDE automatically.
 An isolated width-384 probe completed under Torch 2.7.1/Triton 3.3.1 and its
-cached tuned outputs matched the default kernels in both directions. Shared
-GPU load prevented a reliable performance comparison; see the report above.
+cached tuned outputs matched the default kernels in both directions. The
+subsequent full-model H200 comparison found **7.605 s for TMK3 versus 7.636 s
+for tuned cuEquivariance**, with an untuned baseline of **8.006 s**. The two
+optimized choices were too close to establish a decisive speed winner.
+Full-workload tuning also changed confidence values at small FP32 rounding
+scales, while TMK3 preserved the default outputs bitwise. Keep `auto` as the
+general default; see the report for setup costs, memory and workload limits.
 
 ## Compatibility run
 
