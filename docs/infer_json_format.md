@@ -287,8 +287,16 @@ labels that OpenDDE writes:
 "ipsae_interface": [["A"], ["B", "C"]]
 ```
 
+For an entity with `count > 1`, list each selected copy's output chain label
+individually. For example, if A is the antigen and B/C are the antibody heavy
+and light chains, the selection above scores antigen versus the combined
+antibody.
+
 This pools the protein CA tokens on each side before counting partners and
 computing ipSAE; it is not an average of the individual chain-pair scores.
+This pooled score is a multi-chain extension of the two-chain definition,
+not an output of an unmodified per-chain-pair scoring script. Use the retained
+individual chain-pair records when comparing with that calculation.
 Unlisted chains and pairs within a side do not enter the selected score.
 The selected `ipsae_min_10` and `ipsae_min_10_d0ref` appear in every sample's
 summary, with directional scores and the selected labels in `ipsae_interface`.
