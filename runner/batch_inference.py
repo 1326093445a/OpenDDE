@@ -410,8 +410,8 @@ def get_default_runner(
         n_sample (int): Number of samples.
         batch_size (int): Maximum independent complexes per GPU forward (no MSA).
         confidence_sample_chunk_size (Optional[int]): Samples per confidence call; None processes all samples.
-        batch_max_padding_ratio (float): Padding work ratio cap; 0 disables, otherwise at least 1.
-        batch_max_pair_tokens (int): Pair element budget; 0 disables.
+        batch_max_padding_ratio (float): Padding work ratio cap in both residue and structural token spaces; 0 disables, otherwise at least 1.
+        batch_max_pair_tokens (int): Pair element budget in both token spaces; 0 disables.
         diffusion_cache_max_mb (int): Resident budget in MiB for batched diffusion projection caches; 0 disables them.
         share_diffusion_sample_conditioning (bool): Reuse identical per-step conditioning across samples in a native batch.
         diffusion_attention_backend (str): Reference or optional efficient CUDA SDPA layout.
@@ -613,8 +613,8 @@ def inference_jsons(
         n_sample (int): Number of samples.
         batch_size (int): Maximum independent complexes per GPU forward (no MSA).
         confidence_sample_chunk_size (Optional[int]): Samples per confidence call; None processes all samples.
-        batch_max_padding_ratio (float): Padding work ratio cap; 0 disables, otherwise at least 1.
-        batch_max_pair_tokens (int): Pair element budget; 0 disables.
+        batch_max_padding_ratio (float): Padding work ratio cap in both residue and structural token spaces; 0 disables, otherwise at least 1.
+        batch_max_pair_tokens (int): Pair element budget in both token spaces; 0 disables.
         diffusion_cache_max_mb (int): Resident budget in MiB for batched diffusion projection caches; 0 disables them.
         share_diffusion_sample_conditioning (bool): Reuse identical per-step conditioning across samples in a native batch.
         diffusion_attention_backend (str): Reference or optional efficient CUDA SDPA layout.
@@ -984,13 +984,13 @@ def inference_jsons(
     "--batch_max_padding_ratio",
     type=click.FloatRange(min=0),
     default=0.0,
-    help="Maximum padded/unpadded cubic token work; 0 disables, 1 groups equal lengths only.",
+    help="Maximum padded/unpadded cubic work in both residue and structural tokens; 0 disables, 1 requires equal counts in both.",
 )
 @click.option(
     "--batch_max_pair_tokens",
     type=click.IntRange(min=0),
     default=0,
-    help="Maximum B * max_tokens**2 for a batch; 0 disables. Singletons remain allowed.",
+    help="Maximum B * max_tokens**2 checked in both residue and structural tokens; 0 disables. Singletons remain allowed.",
 )
 @click.option(
     "--diffusion_cache_max_mb",

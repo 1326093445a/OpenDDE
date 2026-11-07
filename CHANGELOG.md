@@ -4,6 +4,11 @@ User-facing changes to OpenDDE are documented here.
 
 ## [Unreleased]
 
+- Added effective batch-limit and early-flush diagnostics, including residue
+  and structural-token counts. Clarified that a padding ratio of `1.0` requires
+  equal sizes in both spaces; equal sequence lengths can still form small
+  batches. Grouping behavior and default limits are unchanged.
+
 - Added opt-in `--trimul_kernel flashpairformer` for exact-mode TMK3 triangle
   multiplication, with an optional opt_core dependency, packed-weight cache
   invalidation, and explicit fallback counts. Default kernels and precision

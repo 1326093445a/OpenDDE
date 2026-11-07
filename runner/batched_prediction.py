@@ -72,21 +72,39 @@ def _batch_token_sizes(data):
     return residue, parent.numel() if parent is not None else residue
 
 
-def _exceeds_batch_budget(sizes, settings):
+def _batch_budget_reason(sizes, settings):
+    """Explain the first configured limit exceeded by a candidate batch."""
     if len(sizes) < 2:
-        return False
-    for lengths in zip(*sizes, strict=True):
+        return None
+    for space, lengths in zip(
+        ("residue", "structural"), zip(*sizes, strict=True), strict=True
+    ):
         maximum = max(lengths)
+        pair_tokens = len(lengths) * maximum**2
         if (
             settings.batch_max_pair_tokens
-            and len(lengths) * maximum**2 > settings.batch_max_pair_tokens
+            and pair_tokens > settings.batch_max_pair_tokens
         ):
-            return True
-        if settings.batch_max_padding_ratio and len(
-            lengths
-        ) * maximum**3 > settings.batch_max_padding_ratio * sum(n**3 for n in lengths):
-            return True
-    return False
+            return (
+                f"{space} pair-token budget exceeded "
+                f"({pair_tokens} > {settings.batch_max_pair_tokens})"
+            )
+        padded_work = len(lengths) * maximum**3
+        unpadded_work = sum(n**3 for n in lengths)
+        if (
+            settings.batch_max_padding_ratio
+            and padded_work > settings.batch_max_padding_ratio * unpadded_work
+        ):
+            return (
+                f"{space} padding ratio exceeded "
+                f"({padded_work / unpadded_work:.9g} > "
+                f"{settings.batch_max_padding_ratio:g})"
+            )
+    return None
+
+
+def _exceeds_batch_budget(sizes, settings):
+    return _batch_budget_reason(sizes, settings) is not None
 
 
 def infer_predict_batched(runner, configs) -> None:
@@ -102,6 +120,14 @@ def infer_predict_batched(runner, configs) -> None:
     )
 
     validate_input_batching(configs)
+    logger.info(
+        "[Rank %d] Batch grouping: max_jobs=%d, max_padding_ratio=%g, "
+        "max_pair_tokens=%d; limits apply to both residue and structural tokens",
+        _distributed_rank(),
+        configs.batch_size,
+        configs.infer_setting.batch_max_padding_ratio,
+        configs.infer_setting.batch_max_pair_tokens,
+    )
     jobs = _load_inference_jobs_synchronized(configs.input_json_path)
     schedule = _resolve_job_seed_schedule(jobs, list(configs.seeds) or None)
     loader = get_inference_dataloader(configs, inputs=jobs)
@@ -232,9 +258,21 @@ def infer_predict_batched(runner, configs) -> None:
             current = _precision_bucket(int(data["N_token"].item()))
             sizes = [_batch_token_sizes(item[0]) for item in pending]
             sizes.append(_batch_token_sizes(data))
-            if pending and (
-                current != bucket or _exceeds_batch_budget(sizes, configs.infer_setting)
-            ):
+            reason = _batch_budget_reason(sizes, configs.infer_setting)
+            if pending and current != bucket:
+                reason = f"precision bucket changed ({bucket} -> {current})"
+            if pending and reason is not None:
+                logger.info(
+                    "[Rank %d] Flushing %d/%d pending jobs before %s: %s; "
+                    "candidate residue tokens=%s, structural tokens=%s",
+                    _distributed_rank(),
+                    len(pending),
+                    configs.batch_size,
+                    data["sample_name"],
+                    reason,
+                    [size[0] for size in sizes],
+                    [size[1] for size in sizes],
+                )
                 predict(pending)
                 pending = []
             bucket = current

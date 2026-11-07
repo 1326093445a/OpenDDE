@@ -272,6 +272,16 @@ own structures, confidence summaries, PAE/PDE maps, atom pLDDT and rankings.
 The final batch may be smaller. Jobs are grouped by approximate sequence length
 and precision policy; a CUDA out-of-memory failure retries smaller batches.
 
+Optional `--batch_max_padding_ratio` and `--batch_max_pair_tokens` limits can
+flush smaller groups before `--batch_size` is reached. Both default to `0`
+(disabled) and apply separately to residue and expanded structural-token
+counts. A padding ratio of `1.0` requires equal counts in **both** spaces:
+equal sequence lengths alone are insufficient because structural counts can
+vary with residue composition. The startup log records the effective limits;
+early-flush logs identify the exceeded limit and both candidate token counts.
+See [padding-aware scheduling](batched_inference_optimizations.md#padding-aware-scheduling)
+for a concrete equal-length example and the implications of relaxing the cap.
+
 The implementation pads and masks the Pairformer, structural refiner and
 diffusion token-transformer inputs. Atom encoding/decoding, reference geometry,
 chain mappings and confidence calculations remain per job with their original

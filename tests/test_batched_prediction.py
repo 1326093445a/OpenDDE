@@ -33,23 +33,30 @@ def _run_scheduler(
     failure=None,
     unique_seeds=False,
     padding_ratio=0.0,
+    pair_budget=0,
+    batch_size=2,
+    job_specs=None,
+    structural_sizes=None,
 ):
+    if job_specs is None:
+        job_specs = [(5, [101, 102]), (2, [101]), (3, [102])]
     jobs = [
         {
             "name": f"job{i}",
             "modelSeeds": seeds,
             "sequences": [{"proteinChain": {"sequence": "A" * n, "count": 1}}],
         }
-        for i, (n, seeds) in enumerate([(5, [101, 102]), (2, [101]), (3, [102])])
+        for i, (n, seeds) in enumerate(job_specs)
     ]
     if unique_seeds:
         for i, job in enumerate(jobs):
             job["modelSeeds"] = [101 + i]
     cfg = build_inference_config(
-        arg_str="--use_msa false --batch_size 2 --sample_diffusion.N_sample 3"
+        arg_str=f"--use_msa false --batch_size {batch_size} --sample_diffusion.N_sample 3"
     )
     cfg.seeds = []
     cfg.infer_setting.batch_max_padding_ratio = padding_ratio
+    cfg.infer_setting.batch_max_pair_tokens = pair_budget
     sampler = InferenceJobSampler(jobs, rank=rank, num_replicas=world_size)
 
     class Loader:
@@ -65,7 +72,15 @@ def _run_scheduler(
                             "N_atom": torch.tensor(n * 4),
                             "N_asym": torch.tensor(1),
                             "N_msa": torch.tensor(1),
-                            "input_feature_dict": {},
+                            "input_feature_dict": (
+                                {}
+                                if structural_sizes is None
+                                else {
+                                    "parent_residue_idx": torch.zeros(
+                                        structural_sizes[i], dtype=torch.long
+                                    )
+                                }
+                            ),
                             "entity_poly_type": {"1": "polypeptide(L)"},
                         },
                         [f"job{i}"] * (n * 4),
@@ -189,6 +204,96 @@ def test_padding_limit_splits_without_losing_job_seeds(monkeypatch):
         ("job2", 102),
     ]
     assert not reports
+
+
+@pytest.mark.parametrize("batch_size", [4, 8])
+@pytest.mark.parametrize("padding_ratio", [0.0, 1.0, 1.05])
+def test_equal_residue_lengths_can_split_on_structural_lengths(
+    monkeypatch, caplog, batch_size, padding_ratio
+):
+    # Equal 320-residue inputs with different glycine counts can have these
+    # structural lengths. Exercise the real scheduler, without a model/GPU.
+    structural_sizes = [
+        620,
+        619,
+        618,
+        617,
+        616,
+        615,
+        614,
+        613,
+        612,
+        612,
+        611,
+        611,
+        611,
+        610,
+        610,
+        610,
+    ]
+    caplog.set_level("INFO", logger="runner.batched_prediction")
+    calls, written, reports = _run_scheduler(
+        monkeypatch,
+        batch_size=batch_size,
+        padding_ratio=padding_ratio,
+        job_specs=[(320, [101])] * 16,
+        structural_sizes=structural_sizes,
+    )
+    expected = (
+        [1] * 8 + [2, 3, 3]
+        if padding_ratio == 1.0
+        else [batch_size] * (16 // batch_size)
+    )
+    assert [len(call) for call in calls] == expected
+    assert written == [(f"job{i}", 101) for i in range(16)]
+    assert not reports
+    if padding_ratio == 1.0:
+        assert "structural padding ratio exceeded" in caplog.text
+        assert "candidate residue tokens=[320, 320]" in caplog.text
+        assert "structural tokens=[620, 619]" in caplog.text
+    else:
+        assert "Flushing" not in caplog.text
+
+
+def test_equal_both_token_spaces_fill_eight_job_batches(monkeypatch):
+    calls, written, reports = _run_scheduler(
+        monkeypatch,
+        batch_size=8,
+        padding_ratio=1.0,
+        job_specs=[(4, [101])] * 16,
+        structural_sizes=[8] * 16,
+    )
+    assert [len(call) for call in calls] == [8, 8]
+    assert len(written) == 16 and not reports
+
+
+def test_pair_budget_flush_log_distinguishes_the_limit(monkeypatch, caplog):
+    caplog.set_level("INFO", logger="runner.batched_prediction")
+    calls, written, reports = _run_scheduler(
+        monkeypatch,
+        batch_size=8,
+        pair_budget=2 * 8**2,
+        job_specs=[(4, [101])] * 4,
+        structural_sizes=[8] * 4,
+    )
+    assert [len(call) for call in calls] == [2, 2]
+    assert "structural pair-token budget exceeded (192 > 128)" in caplog.text
+    assert "padding ratio exceeded" not in caplog.text
+    assert len(written) == 4 and not reports
+
+
+def test_precision_flush_log_distinguishes_the_boundary(monkeypatch, caplog):
+    # Use tiny fake buckets to exercise the scheduling boundary without
+    # allocating confidence maps for thousands of tokens.
+    monkeypatch.setattr(batched_prediction, "_precision_bucket", lambda n: n // 3)
+    caplog.set_level("INFO", logger="runner.batched_prediction")
+    calls, written, reports = _run_scheduler(
+        monkeypatch, batch_size=8, job_specs=[(2, [101]), (3, [101])]
+    )
+    assert [len(call) for call in calls] == [1, 1]
+    assert "precision bucket changed (0 -> 1)" in caplog.text
+    assert "padding ratio exceeded" not in caplog.text
+    assert len(written) == 2 and not reports
 
 
 @pytest.mark.parametrize(

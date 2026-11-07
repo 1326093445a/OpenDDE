@@ -770,12 +770,68 @@ opendde pred -i inputs.json -o output \
   --cycle 10 --step 200 --sample 1
 ```
 
-Equal-sized jobs can still share a forward. Jobs exceeding the cap flush the
+Jobs equal-sized in **both token spaces** can still share a forward. Equal
+protein sequence lengths alone do not guarantee equal structural counts:
+glycine contributes one structural token, while most other complete standard
+protein residues contribute separate backbone and sidechain tokens. Different
+glycine counts can therefore split equal-residue-length designs at a cap of
+`1.0`. This distinction is absent from Mol-1's single-token-space limiter.
+
+Jobs exceeding the cap flush the
 current group; the scheduler does not search the full queue for an optimal
 packing. Job ownership, all requested seeds and sample counts are preserved.
 The Python runner accepts the same argument names. Dotted configuration keys
 are `infer_setting.batch_max_padding_ratio` and
 `infer_setting.batch_max_pair_tokens`.
+
+### Equal-length batch fragmentation audit (2026-11-07)
+
+An external benchmark reported 16 equal-length designs producing eight
+singleton forwards, one pair and two triples, with identical grouping at
+`batch_size=4` and `8`. Its launch configuration and exact prepared token
+counts were not available for this audit, so the cause of that particular run
+is not established. Treat this scheduling question separately from GPU
+contention and model-kernel throughput.
+
+A CPU regression through the real scheduler reproduces the **exact reported
+group-size pattern** with 16 inputs of 320 residue tokens and structural counts
+`[620, 619, 618, 617, 616, 615, 614, 613, 612, 612, 611, 611, 611, 610, 610, 610]`.
+These counts are consistent with standard protein sequences having different
+glycine counts; this is a constructed reproducer, not recovered benchmark data.
+
+| Padding cap | Pair-token cap | `batch_size=4` groups | `batch_size=8` groups |
+| --- | --- | --- | --- |
+| 1.0 | Disabled | Eight singles, one pair, two triples | Same |
+| 1.05 | Disabled | Four groups of four | Two groups of eight |
+| Disabled (0) | Disabled | Four groups of four | Two groups of eight |
+
+Sixteen inputs equal-sized in both token spaces also fill two eight-job batches
+at a cap of `1.0`. Thus this pattern can result from a configured padding cap;
+it does not establish an intrinsic maximum batch size of three. The current
+greedy scheduler only combines adjacent prepared jobs and sorts beforehand by
+estimated sequence length, so it can also miss nonadjacent structural-size
+matches. Changing this packing policy is a separate optimization question.
+
+The scheduler now logs effective limits at startup. Every early flush due to a
+limit or precision change logs its reason, pending/max job counts, and the
+candidate residue and structural counts. These diagnostics do not change the
+grouping policy. OOM retries already emit a distinct memory warning. Use these
+logs, the number of input JSON lists and the per-rank job assignment to diagnose
+a run before attributing small groups to the model.
+
+For the constructed example, `1.05` permits the small structural-size variation;
+it is not a universally optimal cap. Disabling the cap permits more padding.
+Neither choice guarantees a speedup or eight-job memory capacity, and changing
+grouping can change BF16 predictions. Preserve the strict cap when zero padding
+is required; do not silently ignore structural-token sizes to fill a batch.
+
+Validation under the production interpreter: `python -m pytest
+tests/test_batched_prediction.py tests/test_structural_tokenizer.py
+tests/test_inference_config.py tests/test_diffusion_projection_cache.py -q`
+passed **124 tests**, with **two opt-in CUDA tests skipped**. Ruff checks and
+the CLI help smoke check passed. No checkpoint forward or external benchmark
+rerun was required for the scheduling/diagnostic change; the original workload's
+GPU capacity, throughput and precise fragmentation cause remain unverified.
 
 Native singleton groups use the batched sampler and projection caches. They
 can differ numerically from the former legacy fallback. Hold grouping, precision,
