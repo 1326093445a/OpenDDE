@@ -213,6 +213,84 @@ For production runs, enable the preprocessing features you need, for example
 require network access, HMMER/Kalign binaries, and large local search databases;
 see the inference guide for details.
 
+## Optimized No-MSA Inference
+
+The source checkout includes the following inference improvements:
+
+| Improvement | How to use it |
+| --- | --- |
+| Multiple variable-length complexes per GPU forward, with independent seeds and per-job confidence/output splitting | `--batch_size N` in native no-MSA mode |
+| Reuse of diffusion conditioning and projections, including native singleton batches | Enabled by default in the native batched path, within the configured cache budget |
+| Ordered atom aggregation for repeatable CUDA inference | Enabled in the ordinary CUDA inference path; historical BF16 predictions can change |
+| Efficient diffusion attention layout | Opt in with `--diffusion_attention_backend efficient`; floating-point outputs can change |
+| TMK3 triangle multiplication | Opt in with `--trimul_kernel flashpairformer` after installing the optional backend; see the [kernel guide](docs/kernels.md) |
+| Complete-denoiser CUDA replay with cached atom-aggregation plans | Opt in with `--diffusion_cuda_graph true`; defaults off |
+
+### Small batching and replay example
+
+Run from the repository root after installing this checkout and preparing the
+checkpoint and common runtime data. The supplied
+[`replay_smoke.json`](examples/cofold/no_msa_batch/replay_smoke.json) contains two
+synthetic two-chain complexes with **64 and 96 total residues**, each with seed
+101. These are execution fixtures, not a structure-accuracy benchmark; they
+need no MSA/template search databases.
+
+```bash
+CUDA_VISIBLE_DEVICES=0 LAYERNORM_TYPE=torch python -m runner.batch_inference pred \
+  -i examples/cofold/no_msa_batch/replay_smoke.json \
+  -o ./output/replay_example \
+  --device cuda --dtype bf16 \
+  --use_msa false --use_template false --use_rna_msa false \
+  --batch_size 2 --sample 1 --cycle 10 --step 200 \
+  --diffusion_cuda_graph true
+```
+
+This requests two complexes per forward and one predicted structure per complex.
+Each job keeps its own CIF and confidence outputs under
+`output/replay_example/<job_name>/seed_101/`. For a quick execution check, use
+`--cycle 1 --step 20`. For a native eager comparison, use the same command with
+`--diffusion_cuda_graph false` and a different output directory, keeping the
+batch size, grouping, seed and all other settings fixed.
+
+Replay reduced model time by about **10–15% on the small 7r6r example** on shared
+GPUs, but gave **no measurable speedup on 7wux at 2,300 structural tokens**.
+It reduces launch overhead; larger kernels can dominate runtime. Tested replay
+outputs matched native eager bitwise, including confidence. These results do
+not guarantee speedups or equivalence for every input. The BF16 configuration
+retains the existing mixed-precision policy, including FP32 diffusion/confidence
+for the tested lengths; replay does not change precision.
+
+Different lengths are supported, but padding can change BF16 predictions.
+Keep grouping fixed for reproducibility, and use the padding-ratio and pair-token
+limits described in the [batching guide](docs/inference_instructions.md#multiple-complexes-per-gpu)
+when larger batches waste work or exceed memory. Replay requires native no-MSA
+mode, excludes templates, RNA MSA, TFG and Fold-CP, and stays eager with explicit
+deterministic algorithms. Capture failures stop the worker; restart with replay
+disabled. Whole-block compilation remains a benchmark-only experiment.
+
+### Distribute independent jobs across GPUs
+
+The larger [`inputs.json`](examples/cofold/no_msa_batch/inputs.json) contains
+eight variable-length jobs. This example assigns them to two GPU workers, each
+using local batches of up to two jobs:
+
+```bash
+CUDA_VISIBLE_DEVICES=0,1 LAYERNORM_TYPE=torch \
+  torchrun --standalone --nproc_per_node 2 -m runner.batch_inference pred \
+  -i examples/cofold/no_msa_batch/inputs.json \
+  -o ./output/batched_2gpu \
+  --device cuda --dtype bf16 --foldcp_mode single \
+  --use_msa false --use_template false --use_rna_msa false \
+  --batch_size 2 --sample 1 --cycle 10 --step 200
+```
+
+Here each forward runs on one GPU; Fold-CP below instead splits one job across
+GPUs. Eight queued jobs do not imply an eight-job forward. Eight-job CUDA capture
+and idle-GPU replay throughput remain unverified. See the
+[optimization measurements](docs/batched_inference_optimizations.md) and
+[replay usage and failure handling](docs/inference_instructions.md#optional-denoiser-cuda-replay)
+for tested settings, limitations and benchmark commands.
+
 ## Multi-GPU Fold-CP Inference
 
 > [!IMPORTANT]

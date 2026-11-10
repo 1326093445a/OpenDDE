@@ -6,6 +6,11 @@ Each has two distinct synthetic chains, one copy of each, and inference seed
 or use in other tools; its headers identify `<job name>|<chain ID>`. Use the JSON
 with `opendde pred`, which does not accept this FASTA as prediction input.
 
+[`replay_smoke.json`](replay_smoke.json) is the first two jobs from this fixture
+set (64 and 96 residues total), for a small native batching/CUDA replay example.
+See the [main README commands](../../../README.md#small-batching-and-replay-example)
+for both the replay run and a matching native eager comparison.
+
 These are execution and memory fixtures, not known interacting proteins or a
 structure-accuracy benchmark. Sequences were generated locally with Python's
 `random.Random(20261021)`: for each chain in table order, repeat
@@ -87,7 +92,9 @@ cooperate on the same job.
 Each worker batches its assigned jobs locally. Put all jobs in one JSON;
 separate files are processed sequentially and cannot share a batch. Multi-input
 batching requires no external MSA/templates/RNA MSA, no TFG guidance, no trunk
-cache, and the PyTorch triangle kernels. See the complete
+cache. The PyTorch kernel flags above are for compatibility checks; local
+batched inference also supports the optional accelerated triangle backends.
+See the complete
 [batching constraints](../../../docs/inference_instructions.md#multiple-complexes-per-gpu).
 
 For later comparisons, keep seeds, samples, cycles, steps, dtype, and kernels
