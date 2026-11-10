@@ -55,6 +55,7 @@ model_configs: dict[str, Any] = {
         "diffusion_cache_max_mb": 2048,
         "share_diffusion_sample_conditioning": True,
         "diffusion_attention_backend": "reference",
+        "diffusion_cuda_graph": False,
         "reuse_diffusion_window_masks": True,
     },
     "inference_noise_scheduler": {

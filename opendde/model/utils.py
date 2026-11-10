@@ -298,15 +298,37 @@ def broadcast_token_to_atom(
 # Adapted from Mol-1, Copyright 2026 Molence Bio (Apache-2.0).
 def _aggregate_atom_to_token_grouped(x_atom, atom_to_token_idx, n_token, reduce):
     """Reduce each token in atom order, without unordered floating-point atomics."""
-    order = torch.argsort(atom_to_token_idx, stable=True)
-    lengths = torch.bincount(atom_to_token_idx, minlength=n_token or 0)
-    if n_token is not None and lengths.numel() != n_token:
-        raise RuntimeError("atom_to_token_idx exceeds n_token")
+    from opendde.model.inference_cache import get_diffusion_attention_execution
+
+    execution = get_diffusion_attention_execution()
+    plans = None if execution is None else execution.aggregation_plans
+    key = (id(atom_to_token_idx), n_token)
+    if plans is not None and key in plans:
+        _, order, lengths = plans[key]
+    else:
+        if (
+            plans is not None
+            and x_atom.is_cuda
+            and torch.cuda.is_current_stream_capturing()
+        ):
+            raise RuntimeError(
+                "Atom aggregation topology was not warmed before capture"
+            )
+        order = torch.argsort(atom_to_token_idx, stable=True)
+        lengths = torch.bincount(atom_to_token_idx, minlength=n_token or 0)
+        if n_token is not None and lengths.numel() != n_token:
+            raise RuntimeError("atom_to_token_idx exceeds n_token")
+        if plans is not None:
+            # Retain the input to prevent object-id reuse. Topology is fixed for
+            # this sampling request. bincount proves nonnegative lengths whose
+            # sum is the atom count; repeated GPU validation would synchronize.
+            plans[key] = (atom_to_token_idx, order, lengths)
     out = torch.segment_reduce(
         x_atom.index_select(-2, order),
         "sum",
         lengths=lengths.expand(*x_atom.shape[:-2], -1),
         axis=x_atom.ndim - 2,
+        unsafe=plans is not None,
     )
     if reduce == "mean":
         # Preserve sum-then-divide and the caller's dtype, including empty tokens.

@@ -267,7 +267,8 @@ opendde pred -i examples/cofold/no_msa_batch/inputs.json -o ./output/batched \
 
 Here a full batch contains two complexes with three diffusion samples each.
 `--sample` and `--batch_size` are separate axes. The default `--batch_size 1`
-retains the existing single-job path and output layout. Each job/seed gets its
+retains the existing single-job path unless CUDA replay is explicitly enabled.
+Each job/seed gets its
 own structures, confidence summaries, PAE/PDE maps, atom pLDDT and rankings.
 The final batch may be smaller. Jobs are grouped by approximate sequence length
 and precision policy; a CUDA out-of-memory failure retries smaller batches.
@@ -287,6 +288,46 @@ diffusion token-transformer inputs. Atom encoding/decoding, reference geometry,
 chain mappings and confidence calculations remain per job with their original
 dimensions. Seeds and sampling streams are independent of batch membership.
 No MSA disables external alignments; the existing query-only MSA features remain.
+
+### Optional denoiser CUDA replay
+
+`--diffusion_cuda_graph true` captures the complete denoiser once per sampling
+shape and replays it at each diffusion step. It defaults to `false` and requires
+the native no-MSA batching mode, including its restrictions on templates, TFG
+and Fold-CP. The flag selects that mode even with `--batch_size 1`. CPU and
+explicit deterministic-algorithm mode run eagerly; missing static pair caches
+also select eager denoising with a warning.
+
+```bash
+opendde pred -i examples/cofold/no_msa_batch/inputs.json -o ./output/replay \
+  --use_msa false --use_template false --use_rna_msa false \
+  --batch_size 2 --sample 1 --cycle 10 --step 200 --diffusion_cuda_graph true
+```
+
+Random draws, rotations, Euler updates, the trunk and confidence stay outside
+the graph. Atom aggregation reuses a request-local sorting/segment plan while
+preserving the ordered reduction. Captured input/output buffers are released
+before confidence; a changed sample-chunk shape replaces the previous graph.
+Logs report captures, replays, eager calls and setup time. CUDA replay uses no
+automatic length buckets and does not change precision settings.
+
+Benefits depend on input size: shared-GPU measurements showed about 10–15%
+less model time on the small 7r6r example, but no measurable speedup on 7wux
+at 2,300 structural tokens. Replay reduces kernel-launch overhead; larger
+inputs spend more time executing the kernels themselves. These measurements
+do not establish a general speedup; idle-GPU timing remains unverified.
+
+Compare against **native eager batching with the same grouping**, for example
+`--batch_size 2` for a one-job input, rather than the legacy serial path. Capture
+adds setup time and memory. Any capture failure, including capture-time OOM,
+stops the worker before another batch or input file runs. Restart that worker
+with replay disabled: Torch 2.7 can leave its CUDA capture state invalid.
+Python callers receive `DenoiserGraphCaptureError` and must also restart their
+worker process; catching it does not make the CUDA context safe to reuse.
+OOM before capture retains the ordinary batch split-and-retry behavior.
+A singleton that runs out of memory during warmup is reported as failed;
+there is currently no automatic retry with replay disabled.
+See [validation and compiler experiments](batched_inference_optimizations.md).
 
 To distribute batches across GPUs, launch one worker per GPU:
 
@@ -444,6 +485,7 @@ of [infer_json_format.md](./infer_json_format.md) and
 | `--load_checkpoint_path` | Explicit checkpoint path. |
 | `--seeds` | Comma-separated seeds, e.g. `101,102`. Overrides the job's `modelSeeds`; if unset, `modelSeeds` are used, or a random seed when both are absent. |
 | `--batch_size` | Maximum independent complexes per GPU forward; default `1`. Values above `1` require the no-MSA batching mode described above. |
+| `--diffusion_cuda_graph` | Experimental request-scoped denoiser replay; default `false`. Selects native no-MSA batching even for singletons. |
 | `--sample` | Number of diffusion samples per complex, independent of `--batch_size`. |
 | `--use_msa` | Use/generate protein MSA features. |
 | `--use_template` | Use/generate template features. |

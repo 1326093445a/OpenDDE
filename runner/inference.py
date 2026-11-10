@@ -1575,7 +1575,9 @@ def _sampler_owns_inference_sample(sampler: Any, data: Mapping[str, Any]) -> boo
 
 def infer_predict(runner: InferenceRunner, configs: Any) -> None:
     """Run inference with CPU control planes for job/error coordination."""
-    if getattr(configs, "batch_size", 1) > 1:
+    if getattr(configs, "batch_size", 1) > 1 or getattr(
+        getattr(configs, "infer_setting", None), "diffusion_cuda_graph", False
+    ):
         from runner.batched_prediction import infer_predict_batched
 
         with disable_cudnn_benchmark(runner.device):

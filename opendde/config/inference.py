@@ -126,7 +126,7 @@ def validate_input_batching(
         or pair_budget < 0
     ):
         raise ValueError("batch_max_pair_tokens must be a nonnegative integer")
-    if size == 1:
+    if size == 1 and not getattr(configs.infer_setting, "diffusion_cuda_graph", False):
         return
     incompatible = []
     for key in ("use_msa", "use_template", "use_rna_msa"):
@@ -145,7 +145,10 @@ def validate_input_batching(
     if os.environ.get("OPENDDE_TRUNK_CACHE"):
         incompatible.append("OPENDDE_TRUNK_CACHE")
     if incompatible:
-        raise ValueError("batch_size > 1 does not support: " + ", ".join(incompatible))
+        raise ValueError(
+            "Native batching (batch_size > 1 or diffusion_cuda_graph) does not support: "
+            + ", ".join(incompatible)
+        )
 
 
 def validate_inference_schedule(configs: OpenDDEConfig) -> None:

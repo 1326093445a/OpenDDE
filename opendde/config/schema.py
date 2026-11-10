@@ -172,6 +172,7 @@ class InferSettingConfig(BaseConfig):
     diffusion_cache_max_mb: int = Field(default=2048, ge=0)
     share_diffusion_sample_conditioning: bool = True
     diffusion_attention_backend: Literal["reference", "efficient"] = "reference"
+    diffusion_cuda_graph: bool = False
     reuse_diffusion_window_masks: bool = True
 
 

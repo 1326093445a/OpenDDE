@@ -52,6 +52,8 @@ class DiffusionAttentionExecution:
     masks: dict[tuple, torch.Tensor] = field(default_factory=dict)
     mask_bytes: int = 0
     max_mask_bytes: int = 16 * 1024**2
+    # Graph warmup prepares immutable topology outside stream capture.
+    aggregation_plans: dict | None = None
 
 
 _DIFFUSION_ATTENTION: ContextVar[DiffusionAttentionExecution | None] = ContextVar(
@@ -64,7 +66,9 @@ def get_diffusion_attention_execution() -> DiffusionAttentionExecution | None:
 
 
 @contextmanager
-def diffusion_attention_scope(backend: str, reuse_window_masks: bool):
+def diffusion_attention_scope(
+    backend: str, reuse_window_masks: bool, *, reuse_aggregation_plans: bool = False
+):
     """Keep attention choices local to a thread/task and reset even on failure.
 
     Called only around native batched diffusion. Trunk, confidence, training,
@@ -78,10 +82,14 @@ def diffusion_attention_scope(backend: str, reuse_window_masks: bool):
             "Diffusion attention reuse requires inference without gradients"
         )
     execution = DiffusionAttentionExecution(backend, reuse_window_masks)
+    if reuse_aggregation_plans:
+        execution.aggregation_plans = {}
     token = _DIFFUSION_ATTENTION.set(execution)
     try:
         yield execution
     finally:
         execution.masks.clear()
         execution.mask_bytes = 0
+        if execution.aggregation_plans is not None:
+            execution.aggregation_plans.clear()
         _DIFFUSION_ATTENTION.reset(token)

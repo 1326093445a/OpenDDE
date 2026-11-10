@@ -38,6 +38,7 @@ from opendde.data.inference.input_validation import (
 from opendde.data.tools import kalign
 from opendde.data.utils import pdb_to_cif
 from opendde.distributed.foldcp.config import FoldCPConfig
+from opendde.model.denoiser_graph import DenoiserGraphCaptureError
 from opendde.utils.logger import get_logger
 from opendde.utils.logging_config import init_logging
 from runner.cli import CONTEXT_SETTINGS, opendde_cli
@@ -397,6 +398,7 @@ def get_default_runner(
     share_diffusion_sample_conditioning: bool = True,
     diffusion_attention_backend: Literal["reference", "efficient"] = "reference",
     reuse_diffusion_window_masks: bool = True,
+    diffusion_cuda_graph: bool = False,
     device: InferenceDevice = "auto",
 ) -> InferenceRunner:
     """
@@ -416,6 +418,7 @@ def get_default_runner(
         share_diffusion_sample_conditioning (bool): Reuse identical per-step conditioning across samples in a native batch.
         diffusion_attention_backend (str): Reference or optional efficient CUDA SDPA layout.
         reuse_diffusion_window_masks (bool): Reuse bounded local atom attention masks.
+        diffusion_cuda_graph (bool): Opt-in request-scoped CUDA denoiser replay; selects native batching even for singletons.
         dtype (str): Inference data type. Defaults to 'bf16'.
         device (str): Device selection: auto, cpu, cuda, or mps.
         model_name (str): Name of the model checkpoint.
@@ -503,6 +506,7 @@ def get_default_runner(
         share_diffusion_sample_conditioning
     )
     configs.infer_setting.diffusion_attention_backend = diffusion_attention_backend
+    configs.infer_setting.diffusion_cuda_graph = diffusion_cuda_graph
     configs.infer_setting.reuse_diffusion_window_masks = reuse_diffusion_window_masks
     configs.use_msa = use_msa
     configs.triangle_multiplicative = trimul_kernel
@@ -598,6 +602,7 @@ def inference_jsons(
     share_diffusion_sample_conditioning: bool = True,
     diffusion_attention_backend: Literal["reference", "efficient"] = "reference",
     reuse_diffusion_window_masks: bool = True,
+    diffusion_cuda_graph: bool = False,
     device: InferenceDevice = "auto",
 ) -> None:
     """
@@ -619,6 +624,7 @@ def inference_jsons(
         share_diffusion_sample_conditioning (bool): Reuse identical per-step conditioning across samples in a native batch.
         diffusion_attention_backend (str): Reference or optional efficient CUDA SDPA layout.
         reuse_diffusion_window_masks (bool): Reuse bounded local atom attention masks.
+        diffusion_cuda_graph (bool): Opt-in request-scoped CUDA denoiser replay; selects native batching even for singletons.
         dtype (str): Data type.
         device (str): Device selection: auto, cpu, cuda, or mps.
         model_name (str): Model name.
@@ -673,6 +679,7 @@ def inference_jsons(
         share_diffusion_sample_conditioning=share_diffusion_sample_conditioning,
         diffusion_attention_backend=diffusion_attention_backend,
         reuse_diffusion_window_masks=reuse_diffusion_window_masks,
+        diffusion_cuda_graph=diffusion_cuda_graph,
         model_name=model_name,
         load_checkpoint_path=load_checkpoint_path,
         use_msa=use_msa,
@@ -732,7 +739,7 @@ def inference_jsons(
                     world_control_group=world_control_group,
                 )
                 infer_predict(runner, configs)
-            except FoldCPJobCoordinationError as exc:
+            except (FoldCPJobCoordinationError, DenoiserGraphCaptureError) as exc:
                 infer_errors[infer_json] = str(exc)
                 raise
             except Exception as exc:
@@ -1011,6 +1018,12 @@ def inference_jsons(
     help="Native batched diffusion attention: efficient enables supported CUDA SDPA layouts and can change floating-point predictions.",
 )
 @click.option(
+    "--diffusion_cuda_graph",
+    type=bool,
+    default=False,
+    help="Experimental per-batch CUDA denoiser replay; selects native no-MSA batching, including singletons. CPU/deterministic mode stays eager.",
+)
+@click.option(
     "--reuse_diffusion_window_masks",
     type=bool,
     default=True,
@@ -1062,6 +1075,7 @@ def predict(
     share_diffusion_sample_conditioning: bool = True,
     diffusion_attention_backend: Literal["reference", "efficient"] = "reference",
     reuse_diffusion_window_masks: bool = True,
+    diffusion_cuda_graph: bool = False,
     batch_max_padding_ratio: float = 0.0,
     batch_max_pair_tokens: int = 0,
 ) -> None:
@@ -1183,6 +1197,7 @@ def predict(
         share_diffusion_sample_conditioning=share_diffusion_sample_conditioning,
         diffusion_attention_backend=diffusion_attention_backend,
         reuse_diffusion_window_masks=reuse_diffusion_window_masks,
+        diffusion_cuda_graph=diffusion_cuda_graph,
         dtype=dtype,
         device=device,
         model_name=model_name,

@@ -9,7 +9,23 @@ import torch
 
 from opendde.config.inference import build_inference_config
 from opendde.data.inference.infer_dataloader import InferenceJobSampler
+from opendde.model.denoiser_graph import DenoiserGraphCaptureError
 from runner import batched_prediction, inference
+
+
+def test_graph_flag_routes_a_cli_singleton_through_native_scheduler(monkeypatch):
+    cfg = build_inference_config(arg_str="--use_msa false --batch_size 1")
+    cfg.infer_setting.diffusion_cuda_graph = True
+    runner = SimpleNamespace(device=torch.device("cpu"))
+    calls = []
+    monkeypatch.setattr(
+        batched_prediction, "infer_predict_batched", lambda r, c: calls.append((r, c))
+    )
+    monkeypatch.setattr(
+        inference, "_infer_predict_impl", lambda *a, **kw: pytest.fail("legacy path")
+    )
+    inference.infer_predict(runner, cfg)
+    assert calls == [(runner, cfg)]
 
 
 def _prediction(n_atom, n_token, seed):
@@ -107,6 +123,8 @@ def _run_scheduler(
             for d in data
         ]
         calls.append(identities)
+        if failure == "capture":
+            raise DenoiserGraphCaptureError("simulated fatal capture failure")
         if failure == "oom" and len(data) > 1:
             raise torch.cuda.OutOfMemoryError("simulated forward OOM")
         result = [
@@ -129,7 +147,10 @@ def _run_scheduler(
         predict_batch=predict,
         dumper=SimpleNamespace(dump=dump),
     )
-    if failure in {"missing", "writer"}:
+    if failure == "capture":
+        with pytest.raises(DenoiserGraphCaptureError, match="fatal capture"):
+            batched_prediction.infer_predict_batched(runner, cfg)
+    elif failure in {"missing", "writer"}:
         with pytest.raises(RuntimeError, match="inference job/seed"):
             batched_prediction.infer_predict_batched(runner, cfg)
     else:
@@ -161,6 +182,18 @@ def test_scheduler_oom_retries_halves_without_duplicate_outputs(monkeypatch):
     assert [len(call) for call in calls] == [2, 1, 1, 2, 1, 1]
     assert len(written) == len(set(written)) == 4
     assert not reports
+
+
+@pytest.mark.parametrize("batch_size", [1, 2])
+def test_capture_failure_stops_scheduler_without_retry_or_next_job(
+    monkeypatch, batch_size
+):
+    calls, written, reports = _run_scheduler(
+        monkeypatch, failure="capture", batch_size=batch_size
+    )
+    assert len(calls) == 1
+    assert len(calls[0]) == batch_size
+    assert not written and not reports
 
 
 def test_writer_failure_never_repeats_forward(monkeypatch):

@@ -7,6 +7,7 @@ benchmark data; do not commit them. Model timings exclude preparation/writing.
 
 import argparse
 import copy
+from contextlib import nullcontext
 import hashlib
 import importlib.metadata
 import json
@@ -88,12 +89,34 @@ def main():
     parser.add_argument("--steps", type=int, default=200)
     parser.add_argument("--samples", type=int, default=1)
     parser.add_argument("--confidence-chunk", type=int, default=1)
+    parser.add_argument("--diffusion-cache-max-mb", type=int, default=2048)
     parser.add_argument("--repeats", type=int, default=2)
     parser.add_argument("--deterministic", action="store_true")
     parser.add_argument("--compare", type=Path)
     parser.add_argument("--pad-trunk-to", type=int, default=0)
     parser.add_argument("--random-padding", action="store_true")
+    parser.add_argument(
+        "--compile-diffusion-transitions",
+        action="store_true",
+        help="Experimental CUDA transition compilation; keeps attention/RNG eager and disables CUDA graphs.",
+    )
+    parser.add_argument("--diffusion-cuda-graph", action="store_true")
+    parser.add_argument("--compile-diffusion-blocks", action="store_true")
+    parser.add_argument("--cache-atom-aggregation", action="store_true")
     args = parser.parse_args()
+    if (
+        sum(
+            (
+                args.diffusion_cuda_graph,
+                args.compile_diffusion_transitions,
+                args.compile_diffusion_blocks,
+            )
+        )
+        > 1
+    ):
+        parser.error(
+            "Test CUDA replay, transition compilation and block compilation separately."
+        )
     if args.repeats < 2:
         parser.error("Use at least two measured passes for repeatability.")
     sys.path.insert(0, str(args.repo.resolve()))
@@ -102,6 +125,18 @@ def main():
     from runner.batch_inference import get_default_runner
     from runner.batched_prediction import validate_prediction
     from runner.inference import _prepare_prediction_batch
+
+    if args.compile_diffusion_transitions:
+        from scripts.diffusion_compile_experiment import compiled_diffusion_transitions
+    if args.compile_diffusion_blocks:
+        from scripts.diffusion_compile_experiment import compiled_diffusion_blocks
+    if args.cache_atom_aggregation:
+        from scripts.diffusion_compile_experiment import cached_atom_aggregation
+
+        if args.diffusion_cuda_graph:
+            parser.error(
+                "CUDA replay already caches atom aggregation; test caching separately."
+            )
 
     torch.set_num_threads(4)
     args.output.mkdir(parents=True, exist_ok=True)
@@ -118,7 +153,7 @@ def main():
                     value.pop(key, None)
     hashes = {
         str(p.relative_to(args.repo)): hashlib.sha256(p.read_bytes()).hexdigest()
-        for root in ("opendde", "runner")
+        for root in ("opendde", "runner", "scripts")
         for p in (args.repo / root).rglob("*.py")
     }
     report = {
@@ -147,23 +182,43 @@ def main():
     report["cueq_tuning"] = {
         key: os.getenv(key) for key in ("CUEQ_TRITON_TUNING", "CUEQ_TRITON_CACHE_DIR")
     }
-    with get_default_runner(
-        dump_dir=str(args.output / "predictions"),
-        batch_size=max(2, len(jobs)),
-        seeds=[101],
-        n_cycle=args.cycles,
-        n_step=args.steps,
-        n_sample=args.samples,
-        dtype=args.dtype,
-        device="cuda",
-        use_msa=False,
-        use_template=False,
-        use_rna_msa=False,
-        deterministic=args.deterministic,
-        diffusion_attention_backend=args.backend,
-        trimul_kernel=args.trimul_kernel,
-        confidence_sample_chunk_size=args.confidence_chunk,
-    ) as runner:
+    with (
+        get_default_runner(
+            dump_dir=str(args.output / "predictions"),
+            batch_size=max(2, len(jobs)),
+            seeds=[101],
+            n_cycle=args.cycles,
+            n_step=args.steps,
+            n_sample=args.samples,
+            dtype=args.dtype,
+            device="cuda",
+            use_msa=False,
+            use_template=False,
+            use_rna_msa=False,
+            deterministic=args.deterministic,
+            diffusion_attention_backend=args.backend,
+            diffusion_cache_max_mb=args.diffusion_cache_max_mb,
+            diffusion_cuda_graph=args.diffusion_cuda_graph,
+            trimul_kernel=args.trimul_kernel,
+            confidence_sample_chunk_size=args.confidence_chunk,
+        ) as runner,
+        (
+            compiled_diffusion_transitions(runner.model.diffusion_module, True)
+            if args.compile_diffusion_transitions
+            else compiled_diffusion_blocks(
+                runner.model.diffusion_module.diffusion_transformer
+            )
+            if args.compile_diffusion_blocks
+            else nullcontext({"enabled": False, "modules": 0, "compiled_calls": 0})
+        ) as compile_stats,
+        (
+            cached_atom_aggregation()
+            if args.cache_atom_aggregation
+            else nullcontext(None)
+        ) as aggregation_stats,
+    ):
+        report["diffusion_compilation"] = compile_stats
+        report["aggregation_cache"] = aggregation_stats
         if args.pad_trunk_to:
             # Diagnostic-only hooks: change trunk shape while holding inputs,
             # RNG, diffusion shape and all configured model settings fixed.
@@ -249,6 +304,10 @@ def main():
             torch.cuda.synchronize()
             elapsed = time.perf_counter() - start
             record = {
+                "diffusion_compilation": dict(compile_stats),
+                "diffusion_graph": dict(
+                    getattr(runner.model, "last_diffusion_graph_stats", {})
+                ),
                 "seconds": elapsed,
                 "warmup": run == 0,
                 "peak_gib": torch.cuda.max_memory_allocated() / 2**30,
@@ -287,6 +346,8 @@ def main():
                         "seconds": elapsed,
                         "peak_gib": record["peak_gib"],
                         "repeat_differences": len(record.get("repeat_differences", [])),
+                        "compiled_calls": compile_stats["compiled_calls"],
+                        "graph_replays": record["diffusion_graph"].get("replays", 0),
                     }
                 ),
                 flush=True,

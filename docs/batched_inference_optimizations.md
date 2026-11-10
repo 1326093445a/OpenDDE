@@ -1,5 +1,359 @@
 # Mixed-length inference and native ipSAE
 
+## Complete-denoiser replay and whole-block compilation, 2026-11-10
+
+These are separate experiments. **Raw CUDA replay does not use `torch.compile`**;
+the compiler experiment uses full token-transformer blocks and explicitly
+disables compiler-managed CUDA graphs. Both retain the existing padding and
+precision policy. Results below use cached released weights, no MSA, BF16
+configuration (FP32 diffusion for these lengths), and fixed grouping. All GPUs
+were shared, so timing magnitudes need an idle-GPU confirmation.
+
+### Request-scoped denoiser replay
+
+The optional `--diffusion_cuda_graph true` prediction flag captures
+`_denoise_batch`: diffusion conditioning, atom encoder, token transformer, atom
+decoder and coordinate prediction. Random draws, CPU/SciPy rotations, Euler
+updates, trunk and confidence stay eager. Three side-stream warmups prepare
+request caches before capture. Each replay copies coordinates and noise levels
+into persistent buffers and clones outputs so later replay cannot overwrite a
+caller's retained tensors. Only one graph is retained: sample-chunk shape
+changes replace it, and request completion releases it before confidence.
+A capture stream is reused per thread/device. Creating a fresh stream per
+request retained an additional cuBLAS workspace (about 32 MiB on this H200);
+the final implementation reuses that stream while keeping graph buffers and
+conditioning request-local. A repeated-capture test includes GEMM specifically
+to check that tensor storage does not accumulate across closed requests.
+
+The initial capture failed at CUDA `bincount` in atom aggregation. Warmup now
+prepares stable sorting indices and segment lengths once per immutable topology.
+The cached lengths are nonnegative and sum to the atom count by construction;
+the existing ordered `segment_reduce` then skips repeated validation, which
+otherwise synchronizes. The arithmetic stays sum-then-divide. Plans hold their
+source tensor and are cleared with the request. Uncached eager aggregation is
+unchanged. No graph/cache survives into another complex's conditioning.
+
+The flag defaults off. It selects native no-MSA batching even for batch size
+one; compare against **native eager**, not legacy serial inference. CPU,
+gradient and deterministic-algorithm calls stay eager, as do requests lacking
+prepared static pair conditioning. Unsupported native batching combinations
+are rejected before inference. Capture errors, including capture-time OOM,
+raise `DenoiserGraphCaptureError` and stop the worker. Both the batch scheduler
+and the CLI's input-file loop propagate this error immediately: they neither
+split/retry the batch nor move on to another job or file. The original exception
+is retained as its cause. Restart the worker with replay disabled; the observed
+Torch 2.7 capture failure invalidated CUDA state, so eager recovery in that
+process would be unsafe. OOM before capture (including eager warmup) retains
+the ordinary scheduler's split-and-retry behavior. Failure-injection tests cover
+capture entry, body and exit, plus warmup, batch scheduling and the CLI file loop.
+The caller stream waits for queued warmup work even if warmup raises, before
+retry can reuse allocator blocks.
+
+On complete **7r6r, ten recycles, 200 steps, one sample**, each prediction
+recorded **one capture and 200 replays** on both Torch 2.7.1 and 2.11.0. For
+each version, all returned outputs matched that version's native eager baseline
+**bitwise**, including confidence and mappings; repeated graph predictions also
+matched bitwise. A **7r6r/7pzb** batch at one recycle, 20 steps, one sample and
+efficient attention matched its 2.7.1 eager baseline bitwise across all outputs,
+with one capture and 20 replays per batch. Peak allocated memory across those
+short measurements was approximately **5.13–5.22 GiB** for the singleton and
+**25.27–25.51 GiB** for the pair; these are not large-queue memory bounds.
+
+The capture-failure review added **123 passing tests** under production Torch
+2.7.1 with the graph CUDA gate enabled, covering graph execution, injected
+capture/warmup failures, scheduling and config/CLI behavior. Capture failures
+were injected rather than deliberately exhausting device memory. Ruff lint,
+format checks and `git diff --check` passed for the changes.
+The CLI shutdown regression also injects an allocator-cleanup error through
+the real `InferenceRunner.close()` path: existing best-effort cleanup logs that
+secondary error and preserves the original capture exception. Both shutdown
+cases passed after the review.
+
+The follow-up large-input check used complete **7wux: 1,218 residue tokens,
+2,300 structural tokens and 9,142 atoms**, ten recycles, 200 steps and one
+sample. Native eager and two replay predictions ran in one process on a shared
+H200, with efficient attention and the default 2,048 MiB cache budget. Both
+replay predictions recorded **one capture, 200 replays and zero eager calls**.
+All returned fields, including confidence and atom/chain mappings, matched eager
+bitwise; replay also repeated bitwise. Peak allocated memory was **52.237 GiB
+eager / 52.238–52.271 GiB replay**, with post-request resident allocation stable
+at **2.573 GiB** after the first replay. Capture setup was about **1.17 s**.
+These are allocated-memory measurements, not bounds on reserved memory or
+other processes' allocations. Elapsed model times were **287.05 s eager /
+285.10 and 286.30 s replay**. This was a correctness/memory check without a
+separate timing warmup, under shared load; it does not demonstrate a large-input
+speedup or qualify eight-job capture. The BF16 configuration retained its
+existing FP32 diffusion/confidence policy for this input.
+
+A full **7r6r three-sample** check used the same ten recycles, 200 steps and
+efficient attention, with `infer_setting.sample_diffusion_chunk_size=2`. The
+two-sample chunk followed by a one-sample tail recorded **two captures, 400
+replays and no eager calls** per prediction. Both replay predictions matched
+the native eager run bitwise across all fields, including per-sample confidence;
+the replay repeats also matched bitwise. Peak allocated memory was **5.152 GiB
+eager / 5.152–5.156 GiB replay**. This validates sample-chunk shape replacement
+in a complete prediction, not just the small graph unit test. Eight-job capture
+and clean idle-GPU throughput remain unverified.
+
+### Whole token-transformer blocks
+
+`scripts/benchmark_inference.py --compile-diffusion-blocks` compiles the 24 token
+blocks only. Its explicit tensor path uses the original normalization,
+projections, gates, residuals and transition, with an already projected bias
+and an explicit attention-backend argument. This avoids monkeypatching the
+global attention-context getter. Each block receives its own Dynamo code object
+without raising process-global recompile limits. The eager first diffusion step
+populates the request's pair-bias cache; subsequent steps use compiled blocks.
+CPU, training, missing-cache and unsupported attention paths remain eager.
+The projected-bias cache must fit: the default 2 GiB budget did **not** fit the
+7r6r/7pzb pair, and that diagnostic run reported zero compiled calls. Such a run
+is an eager fallback, not evidence of compiled-batch correctness or speed.
+`--diffusion-cache-max-mb` in the benchmark exposes the existing cache budget;
+use the same value for eager and compiled arms and inspect actual call counts.
+
+This experiment currently supports **FP32 diffusion only**. A BF16-autocast
+test exposed another Torch 2.7 tracing failure in the LayerNorm autocast context;
+that mode explicitly stays eager and is tested. No precision override is used.
+The normal BF16 configuration on the tested examples still qualifies because
+its existing diffusion policy is FP32. CUDA graphs are disabled for this arm;
+there is no inference CLI flag or production recommendation for compilation.
+
+On complete 7r6r at ten recycles, 200 steps and one sample, 24 modules served
+**14,328 compiled calls and 72 eager first-step calls** across warmup and two
+measured predictions. Repeated outputs were bitwise identical. Against native
+eager, maximum coordinate-component difference was **0.0009804 A**, unaligned
+component RMS **0.0001116 A**, maximum expected-PAE difference **0.0003023 A**,
+and mean pLDDT difference **0.00001526**. All confidence/mapping keys and shapes
+were compared, extending the coordinate-only scratch experiment supplied in
+the review. These values do not establish universal numerical equivalence.
+
+The mixed-length compiler check required **8,192 MiB** of projection-cache
+budget in both arms. In one loaded model, complete 7r6r/7pzb ran with efficient
+attention, one recycle, 20 steps and one sample, one warmup plus two measured
+passes per arm. All 24 blocks compiled; three compiled predictions served
+**1,368 compiled calls and 72 eager first-step calls**. Each mode repeated
+bitwise, and confidence keys/shapes remained correctly split per job.
+
+| Input | Max coordinate-component difference | Max expected-PAE difference | Mean pLDDT difference |
+| --- | ---: | ---: | ---: |
+| 7r6r | 0.005082 A | 0.15568 A | 0.003624 |
+| 7pzb | 0.000872 A | 0.22637 A | 0.001175 |
+
+The larger confidence differences are a reason to retain this as an experiment,
+not infer quality equivalence from coordinates alone. This reduced-step batch
+does not establish production-setting accuracy. Under shared load, its median
+model time was **15.232 s eager / 15.068 s compiled**, and diffusion time was
+**2.254 / 2.121 s**. Peak allocated memory was about **25.83 GiB**. An earlier
+GPU-0 attempt ran out of memory in the existing trunk after another process
+allocated about 105 GiB; it was excluded, and the check was rerun on GPU 2.
+
+### Separate aggregation-cache control
+
+`--cache-atom-aggregation` is a benchmark-only control that reuses the same
+sorting and segment plans while leaving the denoiser eager. It lets a replay
+comparison distinguish topology reuse from reduced launch overhead. It restores
+the sampler and request state on exit, including exceptions. It does not alter
+the default prediction path. Compilation, replay and cache-only controls should
+first be measured separately on fixed shapes.
+
+```bash
+LAYERNORM_TYPE=torch python scripts/benchmark_inference.py \
+  --input examples/cofold/example.json --names 7r6r --output /tmp/eager
+LAYERNORM_TYPE=torch python scripts/benchmark_inference.py \
+  --input examples/cofold/example.json --names 7r6r --output /tmp/replay \
+  --diffusion-cuda-graph --compare /tmp/eager/last.pt
+LAYERNORM_TYPE=torch python scripts/benchmark_inference.py \
+  --input examples/cofold/example.json --names 7r6r --output /tmp/blocks \
+  --compile-diffusion-blocks --compare /tmp/eager/last.pt
+LAYERNORM_TYPE=torch python scripts/benchmark_inference.py \
+  --input examples/cofold/example.json --names 7r6r --output /tmp/aggregation \
+  --cache-atom-aggregation --compare /tmp/eager/last.pt
+```
+
+### Alternating four-way comparison
+
+One loaded model on shared H200 GPU 2 ran 7r6r with ten recycles, 200 steps,
+one sample and reference attention. After a warmup per arm, three passes per
+arm were interleaved in forward/reverse order. Model time excludes loading,
+featurization and writing; diffusion time includes per-request graph setup.
+
+| Arm | Median model time | Median diffusion time |
+| --- | ---: | ---: |
+| Native eager | 14.690 s | 7.783 s |
+| Aggregation plans only | 13.210 s | 6.307 s |
+| Whole token blocks, no CUDA graphs | 13.889 s | 6.967 s |
+| Aggregation plans plus raw denoiser replay | 12.632 s | 5.697 s |
+
+Every arm repeated bitwise. Aggregation-only and replay matched **all** eager
+outputs bitwise; whole blocks had the small coordinate/confidence differences
+reported above. This independently reproduces the larger-block improvement and
+shows that topology reuse contributes substantially to the raw-replay result.
+It does not measure compilation plus replay together. These timings preceded
+the capture-stream reuse fix; the trace's growing cuBLAS workspaces prompted
+that fix and the GEMM allocation regression test. Shared-GPU timings are
+indicative, not a clean speed guarantee or an eight-GPU scaling result.
+
+After the stream-reuse fix, a fresh same-process eager/replay comparison ran
+one warmup per arm followed by **eager, replay, replay, eager** at the same
+7r6r production settings. Median model time was **14.683 s eager / 12.446 s
+replay** (15.2% lower); diffusion time was **7.766 / 5.528 s** (28.8% lower),
+including capture/setup on every graph prediction. Each graph prediction used
+one capture and 200 replays. All outputs matched eager bitwise, and each mode
+repeated bitwise. After the first workspace allocation, measured resident
+memory stayed around **2.764 GiB**, rather than growing by 32 MiB per capture;
+peak allocation was around **5.254 GiB**. This final check also used a shared
+GPU and only two measured passes per arm, so the speed magnitude remains
+provisional. No idle H200 was available in this session.
+
+### Isolated Torch 2.11 compatibility check
+
+A temporary venv inheriting the production environment's non-Torch dependencies
+was tested with **Torch 2.11.0+cu126 / Triton 3.6.0**. Production remains
+**Torch 2.7.1+cu126 / Triton 3.3.1**. No production environment or dependency pin
+was changed. The existing cuEquivariance 0.10.0 and opt_core 0.5.228.0 remained
+installed. Torch 2.11 imports initially picked an older system `libcudart`; an
+explicit library path to the matching CUDA 12.6 runtime fixed the isolated run.
+
+The 2.11 eager and replay runs completed full 7r6r inference and repeated
+bitwise within each mode. Eager coordinates and expected PAE also matched
+2.7.1 bitwise on this input; some other confidence/contact outputs changed
+slightly (maximum raw pLDDT-logit difference **1.67e-6**). This is an input-level
+compatibility check, not proof that all version changes are numerically neutral.
+The 2.11 GPU suite passed **64 tests plus 102 subtests**, including graph RNG,
+ownership, tail shapes and allocation cleanup, ordered aggregation, projection
+caches, TMK3 width/mask/dtype/residual tests, and triangle compatibility.
+The final stream-reuse tests were repeated on 2.11: **7 passed**. The production
+2.7.1 graph/compiler/cache/aggregation suite passed **60 tests**; the broader
+CPU config/scheduler/attention run passed **208 tests, 37 opt-in CUDA skips**.
+These suites overlap and their counts must not be added as unique tests. Ruff,
+format checks, CLI help, and `git diff --check` also passed.
+
+The package still pins Torch 2.7.1, so the experimental venv intentionally has
+a dependency-version conflict with installed OpenDDE metadata. A production
+migration needs a deliberate packaging change and broader workload validation;
+NCCL/Fold-CP, every external extension, and long BF16-diffusion complexes have
+not been validated on 2.11. Official CUDA wheel choices are documented in the
+[PyTorch 2.11 release notes](https://github.com/pytorch/pytorch/releases/tag/v2.11.0).
+
+## Diffusion compilation experiment, 2026-11-10
+
+The RFD4-Proteina implementation motivated a block-level compilation experiment
+in the existing Torch 2.7.1+cu126 environment. Compiling an unmodified complete OpenDDE
+diffusion block with `fullgraph=True` fails at the request-local attention
+`ContextVar.get()` lookup. The conditioned feed-forward transition compiles
+without changing attention, sampling, precision, or padding.
+
+`scripts/benchmark_inference.py --compile-diffusion-transitions` temporarily
+compiles **only transitions under `model.diffusion_module`**. It uses Inductor,
+`fullgraph=True`, static shapes, and explicitly disables CUDA graphs. The
+surrounding Python sampler, CPU/SciPy rotations, projection caches, atom
+aggregation, trunk and confidence remain eager. CPU, training and gradient
+calls remain eager. The wrapper preserves checkpoint keys, restores methods
+on exit, and raises compiler failures rather than silently timing a fallback.
+Reports include successful compiled-call counts and the benchmark source hashes.
+
+This option belongs to the **benchmark script**, not the prediction CLI. It is
+not a production default or a validated CUDA-graph implementation. Start a new
+benchmark process when changing model weights or devices. New shapes can incur
+compilation and compiler cache limits; no automatic padding buckets or global
+Dynamo cache-limit changes are introduced.
+
+Example with cached assets and the production interpreter:
+
+```bash
+LAYERNORM_TYPE=torch python scripts/benchmark_inference.py \
+  --input examples/cofold/example.json --names 7r6r \
+  --output /tmp/opendde_eager --repeats 3
+LAYERNORM_TYPE=torch python scripts/benchmark_inference.py \
+  --input examples/cofold/example.json --names 7r6r \
+  --compile-diffusion-transitions --output /tmp/opendde_compiled \
+  --compare /tmp/opendde_eager/last.pt --repeats 3
+```
+
+Both commands retain BF16 configuration, ten recycles, 200 steps and one sample
+by default. For these input lengths the existing precision policy still runs
+diffusion in FP32. Warmup includes any compilation/cache loading and is recorded
+separately from measured passes. Use the same grouping and attention backend
+for both arms; compare confidence and mapping outputs as well as coordinates.
+
+### Initial correctness checks
+
+On complete 7r6r at the settings above, all **30 diffusion transition modules**
+compiled, with **18,000 successful compiled calls** across a warmup and two
+measured predictions. Eager and compiled modes each repeated bitwise. Against
+eager execution, compilation changed coordinates by at most **0.005432 A per
+component** (unaligned component RMS **0.0001424 A**), expected PAE by
+**0.0006285 A**, and
+the summary mean pLDDT by **0.00000763**. No shape/key mismatch occurred in the
+comparison of all returned predictions, including confidence and mappings.
+Peak allocated memory was **5.158 GiB** in both modes. This is numerical
+agreement on one input, not bitwise equivalence or a general quality result.
+
+An initial broader scratch probe also compiled three transitions outside the
+diffusion module and changed a coordinate component by **19.47 A**. That probe
+is excluded from the diffusion-only results and is why the saved experiment
+selects the diffusion subtree explicitly rather than replacing the transition
+class globally.
+
+The initial separate-process measured times were **15.09 / 11.08 s** eager and
+**15.20 / 15.17 s** compiled. All GPUs were occupied by other jobs, and the
+baseline itself varied substantially. These numbers establish **no speedup**;
+they are not a clean performance comparison. The compilation warmup also used
+an existing scratch Inductor cache and is not a cold-cache startup benchmark.
+
+A second check batched complete 7r6r and 7pzb (**245 and 600 public tokens**),
+using the existing `efficient` attention backend in both arms, **one recycle,
+20 steps, one sample**, and the same BF16 precision policy. Each mode repeated
+bitwise, and all per-job output keys and shapes agreed, including confidence
+splits. Thirty modules served **2,160 compiled calls** over three predictions;
+atom transitions run separately for each job while token transitions batch them.
+
+| Input | Maximum coordinate-component difference | Maximum expected-PAE difference |
+| --- | ---: | ---: |
+| 7r6r | 0.003974 A | 0.0002108 A |
+| 7pzb | 0.001070 A | 0.0003912 A |
+
+Peak allocated memory was approximately **25.45 GiB** in both arms. This
+reduced-step test validates mixed-length execution and composition with the
+efficient attention backend; it is not a production batch-throughput result.
+
+### Alternating comparison and decision
+
+A single loaded model then ran one warmup per mode followed by six measured
+7r6r predictions in **eager, compiled, compiled, eager, compiled, eager** order.
+The settings remained ten recycles, 200 steps, one sample, BF16 configuration
+and reference attention. Synchronization bracketed the sampler in both arms
+to measure diffusion separately. The medians of three measured passes were:
+
+| Mode | Model time | Diffusion sampling time |
+| --- | ---: | ---: |
+| Eager | 14.704 s | 7.759 s |
+| Compiled diffusion transitions | 14.871 s | 7.979 s |
+
+Compilation was **1.1% slower overall** and **2.8% slower in diffusion** in this
+shared-GPU session. Both modes remained bitwise repeatable, and the
+eager/compiled coordinate difference matched the separate-process check.
+This is not an isolated-GPU estimate, but it provides no reason to recommend
+transition compilation for the tested workload. The experiment remains in the
+benchmark script; **no prediction flag, precision change or default change was
+made**. Larger compiled regions or CUDA graph replay require a separate
+experiment, including resolving attention context outside the compiled region
+and checking graph buffer lifetimes. No Torch upgrade was required here.
+
+The production interpreter ran the focused compiler and projection-cache tests
+on CUDA: **26 passed**. Coverage includes FP32/BF16, cached/uncached transition
+conditioning, repeatability, retained output ownership, eager CPU/gradient
+paths, checkpoint keys, and restoration after compiler failure. The compiler
+tests require `OPENDDE_RUN_COMPILE_TESTS=1`; cache CUDA checks additionally need
+`OPENDDE_RUN_BATCH_KERNEL_TESTS=1`:
+
+```bash
+LAYERNORM_TYPE=torch OPENDDE_RUN_COMPILE_TESTS=1 \
+  OPENDDE_RUN_BATCH_KERNEL_TESTS=1 python -m pytest \
+  tests/test_diffusion_compile_experiment.py \
+  tests/test_diffusion_projection_cache.py -q
+```
+
 ## TMK3 follow-up, 2026-11-05
 
 The optional Mol-1 adapter is now ported as

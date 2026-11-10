@@ -4,6 +4,19 @@ User-facing changes to OpenDDE are documented here.
 
 ## [Unreleased]
 
+- Added opt-in `--diffusion_cuda_graph true` for request-scoped complete-denoiser
+  replay, with stable input buffers, output ownership, shape replacement,
+  capture/replay counters and atom-topology reuse. It selects native no-MSA
+  batching even for singletons; the default remains off. Capture failures,
+  including OOM, terminate the worker instead of continuing with unsafe CUDA
+  state; OOM before capture still supports batch split-and-retry.
+- Added benchmark-only whole-token-block compilation and independent
+  atom-aggregation-cache experiments. Full-block compilation currently targets
+  FP32 diffusion; BF16-autocast diffusion keeps its eager path.
+- Added a benchmark-only `--compile-diffusion-transitions` experiment using
+  Torch Inductor, with compiler execution counts and eager/compiled output
+  comparisons. Prediction CLI defaults and model execution are unchanged.
+
 - Added effective batch-limit and early-flush diagnostics, including residue
   and structural-token counts. Clarified that a padding ratio of `1.0` requires
   equal sizes in both spaces; equal sequence lengths can still form small

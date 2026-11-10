@@ -14,12 +14,16 @@ from typing import Any
 import numpy as np
 import torch
 
+from opendde.model.denoiser_graph import DenoiserGraph
 from opendde.model.inference_cache import (
     InferenceCacheBudget,
     diffusion_attention_scope,
 )
 from opendde.model.utils import centre_random_augmentation, permute_final_dims
 from opendde.utils.torch_utils import autocasting_disable_decorator
+from opendde.utils.logger import get_logger
+
+logger = get_logger(__name__)
 
 
 def pad_token_tensors(
@@ -539,25 +543,41 @@ def forward_batch(model, features: list[dict[str, Any]]) -> list[dict[str, Any]]
                             c_l, p_lm, budget
                         )
                     )
-        with diffusion_attention_scope(
-            cfg.infer_setting.diffusion_attention_backend,
-            cfg.enable_diffusion_shared_vars_cache
-            and cfg.infer_setting.reuse_diffusion_window_masks,
+        graph_enabled = (
+            getattr(cfg.infer_setting, "diffusion_cuda_graph", False)
+            and not module.training
+        )
+        if graph_enabled and static_pair is None:
+            logger.warning(
+                "Diffusion CUDA graph needs prepared static pair conditioning; "
+                "using eager denoising for this request."
+            )
+            graph_enabled = False
+        denoise = lambda x, t: _denoise_batch(
+            module,
+            sample_states,
+            x,
+            t,
+            chunk_size=chunk,
+            fusion=cfg.enable_efficient_fusion,
+            static_pair=static_pair,
+            attention_bias=attention_bias,
+            pair_bias_cache=pair_bias_cache,
+            share_sample_conditioning=cfg.infer_setting.share_diffusion_sample_conditioning,
+        )
+        with (
+            diffusion_attention_scope(
+                cfg.infer_setting.diffusion_attention_backend,
+                cfg.enable_diffusion_shared_vars_cache
+                and cfg.infer_setting.reuse_diffusion_window_masks,
+                reuse_aggregation_plans=graph_enabled,
+            ),
+            DenoiserGraph(denoise, enabled=graph_enabled) as graph,
         ):
+            model.last_diffusion_graph_stats = graph.stats
             return sample_diffusion_batch(
                 sample_states,
-                lambda x, t: _denoise_batch(
-                    model.diffusion_module,
-                    sample_states,
-                    x,
-                    t,
-                    chunk_size=chunk,
-                    fusion=cfg.enable_efficient_fusion,
-                    static_pair=static_pair,
-                    attention_bias=attention_bias,
-                    pair_bias_cache=pair_bias_cache,
-                    share_sample_conditioning=cfg.infer_setting.share_diffusion_sample_conditioning,
-                ),
+                graph if graph_enabled else denoise,
                 schedules=sample_schedules,
                 seeds=seeds,
                 n_sample=cfg.sample_diffusion.N_sample,

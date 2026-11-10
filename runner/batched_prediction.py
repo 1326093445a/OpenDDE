@@ -11,6 +11,7 @@ import torch
 
 from opendde.config.inference import validate_input_batching
 from opendde.data.inference.infer_dataloader import get_inference_dataloader
+from opendde.model.denoiser_graph import DenoiserGraphCaptureError
 from opendde.utils.logger import get_logger
 from opendde.utils.seed import seed_everything
 
@@ -153,6 +154,11 @@ def infer_predict_batched(runner, configs) -> None:
                 raise ValueError(
                     "Model returned a different number of jobs than requested."
                 )
+        except DenoiserGraphCaptureError:
+            # Capture may have invalidated CUDA state. Do not split this batch
+            # or continue to another job on the same worker.
+            logger.critical("Denoiser capture failed; stopping this worker.")
+            raise
         except torch.cuda.OutOfMemoryError as exc:
             # Drop traceback-held CUDA intermediates before retrying. Only
             # forward OOMs are retried; a writer failure never repeats inference.

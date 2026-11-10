@@ -46,6 +46,26 @@ def test_build_inference_config_applies_model_specific_defaults():
     assert cfg.sample_diffusion.N_step == 200
     assert cfg.confidence.distogram.no_bins == 96
     assert cfg.need_atom_confidence is True
+    assert cfg.infer_setting.diffusion_cuda_graph is False
+
+
+def test_graph_singleton_uses_native_batching_validation(monkeypatch):
+    from runner import batch_inference
+    from opendde.config.inference import validate_input_batching
+
+    monkeypatch.setattr(
+        batch_inference,
+        "InferenceRunner",
+        lambda cfg, **kw: SimpleNamespace(configs=cfg),
+    )
+    cfg = batch_inference.get_default_runner(
+        diffusion_cuda_graph=True, batch_size=1, use_msa=False
+    ).configs
+    assert cfg.infer_setting.diffusion_cuda_graph
+    validate_input_batching(cfg)
+    cfg.use_msa = True
+    with pytest.raises(ValueError, match="use_msa=true"):
+        validate_input_batching(cfg)
 
 
 def test_legacy_config_dict_without_device_uses_schema_default():
@@ -1516,6 +1536,46 @@ def test_main_closes_runner_when_inference_fails(monkeypatch):
         inference.main(input_config)
 
     assert len(closed) == 1
+
+
+@pytest.mark.parametrize("cleanup_fails", [False, True])
+def test_capture_failure_stops_cli_before_next_input_file(monkeypatch, cleanup_fails):
+    from opendde.model.denoiser_graph import DenoiserGraphCaptureError
+    from runner import batch_inference, inference
+
+    calls, closed = [], []
+    runner = object.__new__(inference.InferenceRunner)
+    runner.configs = {}
+    runner.device = torch.device("cuda")
+    runner._foldcp_environment_before_publish = None
+
+    def cleanup(device, *, collect_garbage):
+        closed.append(device)
+        if cleanup_fails:
+            raise RuntimeError("CUDA cleanup failed after capture")
+
+    monkeypatch.setattr(inference, "cleanup_device_memory", cleanup)
+    monkeypatch.setattr(inference.dist, "is_available", lambda: False)
+    monkeypatch.setattr(inference, "clear_foldcp_process_mesh_cache", lambda: None)
+    monkeypatch.setattr(batch_inference, "get_default_runner", lambda **kw: runner)
+    monkeypatch.setattr(
+        batch_inference, "_discover_inference_jsons", lambda *a: ["one", "two"]
+    )
+    monkeypatch.setattr(batch_inference, "_validate_input_collection", lambda *a: None)
+    monkeypatch.setattr(batch_inference, "preprocess_input", lambda path, **kw: path)
+
+    failure = DenoiserGraphCaptureError("fatal capture failure")
+
+    def fail_capture(runner, configs):
+        calls.append(configs["input_json_path"])
+        raise failure
+
+    monkeypatch.setattr(batch_inference, "infer_predict", fail_capture)
+    with pytest.raises(DenoiserGraphCaptureError) as caught:
+        batch_inference.inference_jsons("inputs", use_msa=False)
+    assert caught.value is failure
+    assert calls == ["one"]
+    assert closed == [torch.device("cuda")]
 
 
 def test_infer_predict_releases_batch_before_seed_cleanup(monkeypatch, tmp_path):
