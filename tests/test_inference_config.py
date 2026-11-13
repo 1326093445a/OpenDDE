@@ -49,6 +49,101 @@ def test_build_inference_config_applies_model_specific_defaults():
     assert cfg.infer_setting.diffusion_cuda_graph is False
 
 
+@pytest.mark.parametrize("opt_in", [False, True])
+def test_eager_baseline_and_explicit_opt_ins_agree_across_entry_points(
+    monkeypatch, opt_in
+):
+    """CLI forwarding, Python construction and dotted configs share one policy."""
+    from click.testing import CliRunner
+    from runner import batch_inference
+
+    expected = {
+        "dtype": "bf16",
+        "trimul_kernel": "auto",
+        "triatt_kernel": "auto",
+        "enable_cache": True,
+        "enable_fusion": True,
+        "enable_tf32": False,
+        "diffusion_attention_backend": "reference",
+        "diffusion_cuda_graph": False,
+        "diffusion_cache_max_mb": 2048,
+        "share_diffusion_sample_conditioning": True,
+        "reuse_diffusion_window_masks": True,
+        "confidence_sample_chunk_size": 1,
+        "batch_size": 1,
+        "batch_max_padding_ratio": 0.0,
+        "batch_max_pair_tokens": 0,
+        "n_sample": 5,
+    }
+    overrides = (
+        {
+            "dtype": "fp32",
+            "trimul_kernel": "flashpairformer",
+            "diffusion_attention_backend": "efficient",
+            "diffusion_cuda_graph": True,
+        }
+        if opt_in
+        else {}
+    )
+    expected.update(overrides)
+    paths = {
+        "trimul_kernel": "triangle_multiplicative",
+        "triatt_kernel": "triangle_attention",
+        "enable_cache": "enable_diffusion_shared_vars_cache",
+        "enable_fusion": "enable_efficient_fusion",
+        "n_sample": "sample_diffusion.N_sample",
+        **{
+            name: f"infer_setting.{name}"
+            for name in (
+                "diffusion_attention_backend",
+                "diffusion_cuda_graph",
+                "diffusion_cache_max_mb",
+                "share_diffusion_sample_conditioning",
+                "reuse_diffusion_window_masks",
+                "confidence_sample_chunk_size",
+                "batch_max_padding_ratio",
+                "batch_max_pair_tokens",
+            )
+        },
+    }
+    captured = {}
+    file_runner_signature = inspect.signature(batch_inference.inference_jsons)
+    monkeypatch.setattr(
+        batch_inference,
+        "inference_jsons",
+        lambda *args, **kwargs: captured.update(kwargs),
+    )
+    monkeypatch.setattr(
+        batch_inference,
+        "InferenceRunner",
+        lambda cfg, **kwargs: SimpleNamespace(configs=cfg),
+    )
+    flags = ["--input", "unused.json", "--out_dir", "unused", "--use_msa", "false"]
+    for key, value in overrides.items():
+        flags.extend([f"--{key}", str(value).lower()])
+    result = CliRunner().invoke(batch_inference.predict, flags)
+    assert result.exit_code == 0, result.output
+    assert {key: captured[key] for key in expected} == expected
+
+    python_cfg = batch_inference.get_default_runner(use_msa=False, **overrides).configs
+    dotted = " ".join(
+        f"--{paths.get(key, key)} {str(value).lower()}"
+        for key, value in overrides.items()
+    )
+    config_cfg = build_inference_config(arg_str=dotted, fill_required_with_null=True)
+    for cfg in (python_cfg, config_cfg):
+        for key, want in expected.items():
+            value = cfg
+            for component in paths.get(key, key).split("."):
+                value = getattr(value, component)
+            assert value == want, key
+
+    # The file runner's omitted arguments must agree with its CLI and Python API.
+    if not opt_in:
+        for key, want in expected.items():
+            assert file_runner_signature.parameters[key].default == want, key
+
+
 def test_graph_singleton_uses_native_batching_validation(monkeypatch):
     from runner import batch_inference
     from opendde.config.inference import validate_input_batching

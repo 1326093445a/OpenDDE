@@ -253,6 +253,47 @@ BF16 performance varies by Apple GPU and workload, so compare it with FP32 for
 your inputs. BF16 autocast needs macOS 14 or newer and is downgraded to FP32
 below that.
 
+## Default inference baseline
+
+The standard configuration is the **validated pre-replay eager baseline**.
+Correctness fixes and existing eager optimizations remain active; replay and
+later compiler experiments require explicit selection. This policy preserves
+the current numerical defaults rather than reverting to the older unordered
+atom aggregation or changing batch membership.
+
+| Setting | Default | Optional override |
+| --- | --- | --- |
+| Precision | `--dtype bf16`, with the existing length-dependent mixed-precision policy | `--dtype fp32` |
+| Triangle multiplication / attention | `--trimul_kernel auto --triatt_kernel auto` | Explicit cuEquivariance/Torch; optional TMK3 multiplication with `flashpairformer` |
+| Diffusion attention | `--diffusion_attention_backend reference` | `efficient`; floating-point predictions can change |
+| Diffusion caches and existing eager fusions | `--enable_cache true --enable_fusion true` | Explicitly disable for controls; these switches do not enable compilation or replay |
+| Native batch projection cache / shared conditioning / window masks | 2,048 MiB budget / on / on | Existing cache-budget and sharing flags |
+| CUDA denoiser replay | `--diffusion_cuda_graph false` | `true`, subject to the restrictions below |
+| Compilation and independent aggregation-plan-cache experiments | Off; no prediction CLI flag | Benchmark scripts only |
+| TF32 | `--enable_tf32 false` | Explicit override |
+| Batch limit / samples / confidence chunk | `1` / `5` / `1` | Select for the workload; the one-sample examples use `--sample 1` |
+
+`auto` selects available cuEquivariance kernels on compatible CUDA installations
+and retains the Torch fallback; it does not automatically select TMK3. Ordered
+CUDA atom aggregation, native singleton/batch caches, confidence splitting and
+the optional per-job `ipsae_interface` selection remain supported. Grouped
+ipSAE requires an explicit interface because the intended chain grouping cannot
+be inferred generally. Existing jobs retain their scoring behavior.
+
+No dependency upgrade, compilation or graph capture is triggered by the default
+configuration. Keep batch grouping fixed for reproducible comparisons. The
+ordinary `--batch_size 1` CLI route remains legacy serial inference; selecting
+`--batch_size 2` permits native eager batching even when only one job is present.
+Enabling replay also selects native batching, so comparing it with legacy
+serial inference changes more than graph execution.
+
+The [README eager example](../README.md#default-eager-batching-example) uses ten
+recycles, 200 steps and one sample per complex. Later experiments remain
+available for explicit evaluation; they are not promoted to defaults by an
+installation, checkpoint or Torch upgrade. In particular, whole-Pairformer
+BF16 compilation changes coordinates and confidence substantially; see the
+[measurement report](batched_inference_optimizations.md).
+
 ## Multiple complexes per GPU
 
 For independent complexes without MSA, set `--batch_size` to the maximum number
@@ -498,6 +539,6 @@ of [infer_json_format.md](./infer_json_format.md) and
 | `--foldcp_metrics_jsonl` | Optional JSONL path for Fold-CP timing and memory metrics. |
 | `--dtype` | `bf16` or `fp32`. |
 | `--device` | `auto`, `cpu`, `cuda`, or `mps`; auto uses CUDA when available, then Apple MPS, and otherwise CPU. |
-| `--trimul_kernel`, `--triatt_kernel` | `auto`, `cuequivariance`, or `torch`. |
+| `--trimul_kernel`, `--triatt_kernel` | Default `auto`; explicit `cuequivariance` or `torch`. Multiplication also accepts optional `flashpairformer` (TMK3). |
 
 Run `opendde <command> --help` for the full option list.

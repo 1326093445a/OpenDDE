@@ -33,7 +33,8 @@ model_configs: dict[str, Any] = {
     "enable_diffusion_shared_vars_cache": False,
     "enable_efficient_fusion": False,
     "enable_tf32": False,
-    # Inference defaults to bf16; fp32 is available via --dtype fp32.
+    # Stable pre-replay inference baseline. BF16 retains the length-dependent
+    # AMP policy; FP32 remains an explicit override. See inference_instructions.md.
     "dtype": "bf16",
     "skip_amp": {
         "sample_diffusion": True,
@@ -54,8 +55,8 @@ model_configs: dict[str, Any] = {
         "batch_max_pair_tokens": 0,
         "diffusion_cache_max_mb": 2048,
         "share_diffusion_sample_conditioning": True,
-        "diffusion_attention_backend": "reference",
-        "diffusion_cuda_graph": False,
+        "diffusion_attention_backend": "reference",  # Efficient layout is opt-in.
+        "diffusion_cuda_graph": False,  # Replay is opt-in; compilation is benchmark-only.
         "reuse_diffusion_window_masks": True,
     },
     "inference_noise_scheduler": {

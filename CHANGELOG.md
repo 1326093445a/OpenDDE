@@ -4,6 +4,14 @@ User-facing changes to OpenDDE are documented here.
 
 ## [Unreleased]
 
+- Established the pre-replay eager configuration as the documented default:
+  BF16 mixed precision, automatic triangle kernels, reference diffusion
+  attention and existing caches/fusions. README examples now start with eager
+  batching. Replay, efficient attention and TMK3 remain explicit opt-ins;
+  compilation remains benchmark-only. Runtime values, batching defaults and
+  precision thresholds are unchanged; CLI help and cross-entry-point default
+  checks make the policy explicit.
+
 - Added opt-in `--diffusion_cuda_graph true` for request-scoped complete-denoiser
   replay, with stable input buffers, output ownership, shape replacement,
   capture/replay counters and atom-topology reuse. It selects native no-MSA

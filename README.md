@@ -215,18 +215,25 @@ see the inference guide for details.
 
 ## Optimized No-MSA Inference
 
-The source checkout includes the following inference improvements:
+**The default is the validated pre-replay eager baseline:** BF16 mixed
+precision, automatic triangle-kernel selection, reference diffusion attention,
+and the existing conditioning/projection caches and eager fusions. CUDA replay
+is off; compiler experiments are available only through benchmark scripts.
+The length-dependent precision policy is unchanged: diffusion and confidence
+stay FP32 through 2,560 tokens. No Torch upgrade is needed.
 
 | Improvement | How to use it |
 | --- | --- |
 | Multiple variable-length complexes per GPU forward, with independent seeds and per-job confidence/output splitting | `--batch_size N` in native no-MSA mode |
 | Reuse of diffusion conditioning and projections, including native singleton batches | Enabled by default in the native batched path, within the configured cache budget |
 | Ordered atom aggregation for repeatable CUDA inference | Enabled in the ordinary CUDA inference path; historical BF16 predictions can change |
+| Grouped ipSAE for selected protein-chain interfaces | Supported through each job's `ipsae_interface`; existing jobs keep their scoring behavior |
 | Efficient diffusion attention layout | Opt in with `--diffusion_attention_backend efficient`; floating-point outputs can change |
 | TMK3 triangle multiplication | Opt in with `--trimul_kernel flashpairformer` after installing the optional backend; see the [kernel guide](docs/kernels.md) |
 | Complete-denoiser CUDA replay with cached atom-aggregation plans | Opt in with `--diffusion_cuda_graph true`; defaults off |
+| Diffusion or Pairformer compilation | Benchmark-only; never enabled by prediction defaults |
 
-### Small batching and replay example
+### Default eager batching example
 
 Run from the repository root after installing this checkout and preparing the
 checkpoint and common runtime data. The supplied
@@ -238,19 +245,32 @@ need no MSA/template search databases.
 ```bash
 CUDA_VISIBLE_DEVICES=0 LAYERNORM_TYPE=torch python -m runner.batch_inference pred \
   -i examples/cofold/no_msa_batch/replay_smoke.json \
-  -o ./output/replay_example \
+  -o ./output/eager_example \
   --device cuda --dtype bf16 \
   --use_msa false --use_template false --use_rna_msa false \
-  --batch_size 2 --sample 1 --cycle 10 --step 200 \
-  --diffusion_cuda_graph true
+  --batch_size 2 --sample 1 --cycle 10 --step 200
 ```
 
 This requests two complexes per forward and one predicted structure per complex.
 Each job keeps its own CIF and confidence outputs under
-`output/replay_example/<job_name>/seed_101/`. For a quick execution check, use
-`--cycle 1 --step 20`. For a native eager comparison, use the same command with
-`--diffusion_cuda_graph false` and a different output directory, keeping the
-batch size, grouping, seed and all other settings fixed.
+`output/eager_example/<job_name>/seed_101/`. For a quick execution check, use
+`--cycle 1 --step 20`. The fixture's filename predates this default policy;
+it does not enable replay. The example explicitly selects a batch limit of two
+and one sample; CLI defaults remain `--batch_size 1` and `--sample 5`.
+
+Different lengths are supported, but padding can change BF16 predictions.
+Keep grouping fixed for reproducibility, and use the padding-ratio and pair-token
+limits described in the [batching guide](docs/inference_instructions.md#multiple-complexes-per-gpu)
+when larger batches waste work or exceed memory. See the
+[default/optional settings](docs/inference_instructions.md#default-inference-baseline)
+for the complete policy.
+
+### Optional replay and compiler experiments
+
+To opt into replay, add `--diffusion_cuda_graph true` to the eager command above
+and choose a different output directory. Keep the batch size, grouping, seed
+and other settings fixed when comparing results. Removing the flag restores
+the default eager execution.
 
 Replay reduced model time by about **10–15% on the small 7r6r example** on shared
 GPUs, but gave **no measurable speedup on 7wux at 2,300 structural tokens**.
@@ -260,13 +280,14 @@ not guarantee speedups or equivalence for every input. The BF16 configuration
 retains the existing mixed-precision policy, including FP32 diffusion/confidence
 for the tested lengths; replay does not change precision.
 
-Different lengths are supported, but padding can change BF16 predictions.
-Keep grouping fixed for reproducibility, and use the padding-ratio and pair-token
-limits described in the [batching guide](docs/inference_instructions.md#multiple-complexes-per-gpu)
-when larger batches waste work or exceed memory. Replay requires native no-MSA
-mode, excludes templates, RNA MSA, TFG and Fold-CP, and stays eager with explicit
+Replay requires native no-MSA mode, excludes templates, RNA MSA, TFG and Fold-CP,
+and stays eager with explicit
 deterministic algorithms. Capture failures stop the worker; restart with replay
-disabled. Whole-block compilation remains a benchmark-only experiment.
+disabled. Whole-block compilation remains a benchmark-only experiment: the
+BF16 Pairformer experiment changed 7r6r by 9.10 Å aligned RMSD and changed
+confidence, despite only about a 6% shared-GPU timing improvement. It is not
+part of the default or a recommended equivalent backend. See the
+[experiment results](docs/batched_inference_optimizations.md#rfd4-inspired-whole-pairformer-compilation-experiment-2026-11-13).
 
 ### Distribute independent jobs across GPUs
 

@@ -1,5 +1,250 @@
 # Mixed-length inference and native ipSAE
 
+## Default policy, 2026-11-13
+
+The supported default configuration is the validated **pre-replay eager
+baseline**: BF16 mixed precision with the existing module/length policy,
+automatic triangle kernels, reference diffusion attention, existing eager
+fusions and bounded conditioning/projection caches. Ordered CUDA aggregation,
+native batching, per-job confidence splitting and explicit grouped-ipSAE
+selection remain in place.
+
+CUDA replay, efficient attention and TMK3 remain opt-in. Diffusion/Pairformer
+compilation and standalone aggregation-plan-cache controls remain benchmark-only;
+the reports below do not promote them to default inference. Runtime default
+values were already consistent with this policy. CLI help, the README's first
+example and tests now make it explicit across configuration and Python entry
+points. No precision thresholds, batch limits, sample counts or dependencies
+changed. See [the default settings table](inference_instructions.md#default-inference-baseline)
+and [the eager example](../README.md#default-eager-batching-example).
+
+## RFD4-inspired whole Pairformer compilation experiment, 2026-11-13
+
+**Keep this benchmark-only: compiling the BF16 trunk changes predictions and
+confidence materially.** No production inference flag, backend default,
+checkpoint, precision setting or dependency changed. This experiment is
+separate from the existing denoiser CUDA replay feature, which does not compile
+the trunk.
+
+`scripts/benchmark_inference.py --compile-pairformer-blocks` compiles the 48
+main Pairformer blocks individually with `fullgraph=True`, static shapes and
+Inductor CUDA graphs disabled. Diffusion and confidence execute eagerly. The
+production environment is Torch 2.7.1+cu126 / Triton 3.3.1 / cuEquivariance
+0.10.0 with `opendde_v1` (`opendde.pt`), `LAYERNORM_TYPE=torch`, TF32 off
+and cuEquivariance triangles.
+
+Unmodified blocks fail Dynamo tracing at an attention `ContextVar` read and
+the `ExitStack` used for autocast boundaries. Temporary instance-local wrappers
+make those operations explicit without modifying model source or checkpoint
+names. Tests confirm the wrappers themselves match eager arithmetic bitwise
+in FP32 and BF16, before compilation. CPU, gradients, training, lengths <=16,
+unsupported kernel selections and active diffusion attention scopes stay eager;
+distributed Fold-CP is rejected. Compiler errors propagate and original methods
+are restored on exit, including exceptions. The benchmark requires exclusive
+access to the model instance.
+
+### Full-checkpoint findings
+
+The comparisons hold features, seed 101, grouping, precision, 10 recycles,
+200 diffusion steps, reference diffusion attention and all model weights fixed.
+All inputs use no MSA/templates/RNA MSA. Modes alternate within one loaded
+model, with a separate first pass for each mode. Every compiled prediction
+executes **480 compiled block calls**, with no eager block fallbacks. All GPUs
+were shared; warmed timing comparisons are indicative, not clean speed claims.
+
+For the 245-token 7r6r singleton at BF16, three measured passes per mode gave:
+
+| Measurement | Eager | Compiled |
+| --- | ---: | ---: |
+| Median model time | 14.70 s | 13.80 s |
+| Median summed Pairformer time | 5.25 s | 4.36 s |
+| First model pass, including setup | 16.16 s | 59.54 s |
+| Warm peak allocated memory | 5.25 GiB | 4.86 GiB |
+
+The median model reduction is about **6.1%**, but the last eager pass dropped to
+11.64 s as contention changed. First-use compilation/setup added roughly 45 s
+of trunk time relative to the warmed compiled median, with an already populated
+on-disk kernel cache. Different static shapes incur additional specialization.
+
+Numerics are the decisive issue: aligned all-atom coordinate RMSD is **9.10 Å**,
+mean pLDDT changes **65.513 → 64.240**, pTM **0.7368 → 0.7181**, ipTM
+**0.7749 → 0.7679**, and ranking score **0.7673 → 0.7579**. Expected token-pair
+PAE differs by up to **8.87 Å**. Eager and compiled each repeat bitwise across
+all compared output fields; reproducibility does not establish equivalence.
+This comparison changes neither padding nor batch membership.
+
+A separate single-block control with
+`TORCHINDUCTOR_EMULATE_PRECISION_CASTS=1` still has BF16 feature differences
+(maximum pair-feature difference about 0.0403), so that option is not an exact
+fix. This was a block-level control, not a full-prediction benchmark.
+
+The full FP32 7r6r control is much closer: **0.000270 Å** aligned RMSD,
+**0.000613 Å** maximum expected-PAE difference, and mean pLDDT difference
+**0.000023**. That does not establish equivalence across inputs or justify
+changing the default BF16 workload. Two warmed passes per mode gave median
+model times of **29.40 s eager / 29.52 s compiled**, so this control shows no
+end-to-end gain under the observed shared load.
+
+With three BF16 samples on 7r6r, aligned RMSDs are **8.87 / 2.87 / 2.35 Å** and
+the maximum expected-PAE difference is **11.43 Å**. The zero-based sample ranking
+order is `[2, 0, 1]` in both modes, but ranking-score values change by up to
+**0.0188**. All per-sample confidence axes validate and each mode repeats bitwise.
+This single unchanged ranking is not evidence of preserved campaign rankings.
+Two warmed passes per mode gave **19.00 s eager / 21.13 s compiled**; the wide
+timing variation prevents a useful speed estimate for this case.
+
+The fixed two-job BF16 batch contains 7r6r/7pzb at **245/600 trunk tokens**. Compiled
+versus eager aligned RMSDs are **11.45 / 1.83 Å**, with maximum expected-PAE
+differences **7.29 / 5.27 Å**. Mean pLDDT differences are **0.410 / 0.414**.
+Both jobs retain the correct independent residue/atom and confidence axes.
+This comparison holds the padded grouping fixed; it does not compare batched
+predictions with singleton predictions. The examples include protein/DNA
+complexes and, for 7pzb, ligands. Both modes repeat bitwise across all fields.
+Two warmed passes per mode give **103.97 s eager / 102.85 s compiled** for
+the batch, only about a 1.1% difference under shared load. Warm peak allocated
+memory is **26.00 / 25.60 GiB**. These measurements do not support a useful
+general end-to-end speedup claim.
+
+### Validation scope
+
+The focused tests check eager-wrapper equivalence, FP32/BF16 compiled outputs,
+static-shape recompilation, repeatability, masked-padding content independence,
+batch isolation, state-dict preservation, restored method overrides, eager
+fallbacks and compiler failure propagation. Compilation tolerances in the small
+tests apply to internal features; full-checkpoint differences above are reported
+separately and fail a prediction-equivalence requirement.
+
+The checkpoint probes validate finite prediction tensors, residue/atom axes,
+per-job and per-sample confidence splits, and compare all returned fields.
+These examples do not specify `ipsae_interface`; their top-level ipSAE is null.
+They therefore do **not** establish grouped-ipSAE score or ranking parity.
+No eight-job, distributed, training or clean-idle-GPU benchmark was run for
+this candidate. Production dependencies and defaults remain unchanged.
+
+Targeted test command (production interpreter, CUDA gates enabled):
+
+```bash
+CUDA_VISIBLE_DEVICES=0 LAYERNORM_TYPE=torch OPENDDE_RUN_COMPILE_TESTS=1 \
+  python -m pytest tests/test_pairformer_compile_experiment.py \
+  tests/test_diffusion_compile_experiment.py tests/test_triton_compatibility.py -q
+```
+
+The final Pairformer file passed **7 tests**; the adjacent compilation/Triton
+files passed **15 tests**. Ruff and `git diff --check` passed, and benchmark help
+and conflicting-option rejection were checked. This is targeted validation,
+not a claim that the entire repository test suite was run.
+
+### Reproduce the prediction comparison
+
+From the checkout in the production environment, use separate artifact folders:
+
+```bash
+CUDA_VISIBLE_DEVICES=0 LAYERNORM_TYPE=torch python scripts/benchmark_inference.py \
+  --input examples/cofold/example.json --names 7r6r \
+  --output /tmp/pairformer-eager --dtype bf16 --trimul-kernel cuequivariance \
+  --cycles 10 --steps 200 --samples 1 --repeats 3
+
+CUDA_VISIBLE_DEVICES=0 LAYERNORM_TYPE=torch python scripts/benchmark_inference.py \
+  --input examples/cofold/example.json --names 7r6r \
+  --output /tmp/pairformer-compiled --dtype bf16 --trimul-kernel cuequivariance \
+  --cycles 10 --steps 200 --samples 1 --repeats 3 \
+  --compile-pairformer-blocks --compare /tmp/pairformer-eager/last.pt
+```
+
+Reports retain all-field comparisons, repeat checks and cumulative
+`pairformer_compilation` counters. These commands run the modes in separate
+processes; the timing experiment above alternated them within one process.
+Use `--names 7r6r 7pzb` for the mixed-length batch, `--samples 3` for multiple
+samples, or `--dtype fp32` for the precision control. Do not combine this flag
+with diffusion compilation, CUDA replay or the aggregation-cache experiment.
+
+## RFD4 fused pair-attention compatibility experiment, 2026-11-13
+
+**The proposed direct port is not suitable for the current OpenDDE model and
+production environment.** This experiment stops at the compatibility gate;
+no prediction backend, precision setting, dependency pin or default changed.
+It corrects the earlier suggestion that RFD4's fused pair attention would be
+the first straightforward kernel port to try.
+
+The production interpreter has Torch **2.7.1+cu126** and cuEquivariance **0.10.0**.
+RFD4's implementation calls the **0.13** API accepting raw single/pair features
+and normalization/projection weights. The installed 0.10 API instead takes
+already projected Q/K/V; its gate and output projection remain separate Torch
+operations. A 0.13 wheel overlay failed to import its attention operation under
+Torch 2.7.1 because it requires newer FX APIs; the wheel declares Torch >=2.11.
+An isolated **Torch 2.11.0+cu126 / cuEquivariance 0.13.0** environment imported
+successfully and ran the GPU checks below. Production packages were untouched.
+
+Three model-level constraints remain even after that version change:
+
+- OpenDDE's main Pairformer uses **384-wide pair features with LayerNorm**.
+  The vendor's whole-operation LayerNorm flash kernel accepts pair widths
+  **128 or 256**, not 384. Its separate RMSNorm width-384 route does not preserve
+  this model's normalization.
+- OpenDDE's diffusion uses **adaptive LayerNorm**, with a condition-dependent
+  scale and shift. The RFD4 API unconditionally applies an ordinary single-input
+  normalization before projecting Q/K/V. Passing OpenDDE's adaptive output into
+  it would normalize a second time and change the computation. A synthetic
+  check with nonzero conditioning weights confirms this is not an identity.
+- The tested OpenDDE lengths use **FP32 diffusion** under the existing BF16
+  configuration. The vendor's whole-operation flash path requires BF16/FP16.
+  Its fixed mask constant and raw-pair/cache requirements impose further
+  restrictions; changing those settings is not a precision-preserving port.
+
+### GPU compatibility checks
+
+The diagnostic uses OpenDDE's own `AttentionPairBias` with nonzero output
+weights, fixed seeds, TF32 off and an H200. It instruments actual vendor
+dispatch, rather than treating a successful API call as evidence of fusion.
+
+| Case | Batch / tokens | Single / pair width | Precision | Whole-operation flash route |
+| --- | --- | --- | --- | --- |
+| Trunk | 1 / 245 | 384 / 384 | FP32 | No; native Torch fallback |
+| Trunk | 1 / 245 | 384 / 384 | BF16 autocast | No; native Torch fallback |
+| Padded trunk batch | 2 / 320 | 384 / 384 | BF16 autocast | No; native Torch fallback |
+| Large trunk | 1 / 1218 | 384 / 384 | BF16 autocast | No; native Torch fallback |
+| Diffusion-shape control with ordinary LayerNorm | 1 / 475 | 768 / 128 | FP32 | No; native Torch fallback |
+| Supported vendor-shape control | 1 / 512 | 256 / 128 | BF16 autocast | Yes, with vendor-default mask constant |
+
+The ordinary-LayerNorm diffusion control isolates shape/dtype support; it is
+**not** an adapter for OpenDDE's actual adaptive-normalized diffusion. The
+supported control confirms that the installation can execute the flash kernel.
+Unmasked tests with the vendor-default mask constant still left all five
+OpenDDE-shaped cases on native fallback, independently of the masking penalty.
+The supported control's cached-bias call selected the pair-bias/SDPA route,
+not the whole-operation flash route. A component API call does not by itself
+prove that its internal projection kernel is fused.
+
+All six cases check output shapes through tensor comparison, finite values,
+bitwise repeats, projected-bias reuse, key padding, and (for the two-job case)
+a fully masked job. Operator differences are checked against FP32 `3e-6` /
+BF16 `0.01` maximum absolute tolerances. These are feature-value tolerances,
+not coordinate or confidence bounds. The probes use synthetic tensors, not
+checkpoint predictions. **No full-prediction, confidence-score/ranking or
+end-to-end speedup claim is made for this candidate**: there is no admitted
+whole-operation path to validate under the existing model semantics.
+
+### Reproduce
+
+Use a separate environment with Torch >=2.11, cuEquivariance 0.13 CUDA packages
+and OpenDDE's remaining dependencies; the repository's production pins remain
+2.7.1/0.10.0. With that environment active, run from the checkout:
+
+```bash
+CUDA_VISIBLE_DEVICES=0 LAYERNORM_TYPE=torch python scripts/probe_fused_pair_attention.py \
+  --output /tmp/opendde_fused_pair_attention.json
+```
+
+The script checks the 0.13 API and SM90 device, asserts dispatch for all six
+cases, restores its temporary instrumentation, and records versions, warnings,
+comparisons and its source hash. It rejects the production 0.10 API before
+running the probes. Vendor route instrumentation uses private implementation
+names and intentionally targets 0.13; it is not part of prediction execution.
+
+Further work would need a kernel accepting OpenDDE's pre-normalized adaptive
+features and cached arbitrary pair bias, or a separate Pairformer compilation
+experiment. Neither is implemented or validated by this compatibility study.
+
 ## Complete-denoiser replay and whole-block compilation, 2026-11-10
 
 These are separate experiments. **Raw CUDA replay does not use `torch.compile`**;

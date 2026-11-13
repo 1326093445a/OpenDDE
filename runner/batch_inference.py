@@ -778,7 +778,8 @@ def inference_jsons(
     "--dtype",
     type=click.Choice(INFERENCE_DTYPE_CHOICES, case_sensitive=False),
     default="bf16",
-    help="Inference dtype. Defaults to bf16; pass fp32 for full precision.",
+    show_default=True,
+    help="Stable inference uses BF16 mixed precision with the existing per-module policy; fp32 selects full precision.",
 )
 @click.option(
     "--device",
@@ -819,25 +820,29 @@ def inference_jsons(
         ("auto", "cuequivariance", "torch", "flashpairformer"), case_sensitive=False
     ),
     default="auto",
-    help="Triangle multiplication: auto, cuequivariance, torch, or optional BF16 flashpairformer (TMK3).",
+    show_default=True,
+    help="Stable triangle multiplication uses auto; flashpairformer (TMK3) is an optional BF16 backend.",
 )
 @click.option(
     "--triatt_kernel",
     type=click.Choice(("auto", "cuequivariance", "torch"), case_sensitive=False),
     default="auto",
+    show_default=True,
     help="Triangle attention kernel ('auto', 'cuequivariance', or 'torch').",
 )
 @click.option(
     "--enable_cache",
     type=bool,
     default=True,
+    show_default=True,
     help="Cache shareable variables in the diffusion module.",
 )
 @click.option(
     "--enable_fusion",
     type=bool,
     default=True,
-    help="Enable efficient kernel fusion in the diffusion transformer.",
+    show_default=True,
+    help="Enable existing eager diffusion fusions; does not enable torch.compile or CUDA replay.",
 )
 @click.option(
     "--enable_tf32",
@@ -1015,13 +1020,15 @@ def inference_jsons(
     "--diffusion_attention_backend",
     type=click.Choice(["reference", "efficient"]),
     default="reference",
-    help="Native batched diffusion attention: efficient enables supported CUDA SDPA layouts and can change floating-point predictions.",
+    show_default=True,
+    help="Stable native batched attention uses reference; optional efficient CUDA SDPA layouts can change predictions.",
 )
 @click.option(
     "--diffusion_cuda_graph",
     type=bool,
     default=False,
-    help="Experimental per-batch CUDA denoiser replay; selects native no-MSA batching, including singletons. CPU/deterministic mode stays eager.",
+    show_default=True,
+    help="Optional experimental CUDA denoiser replay; stable inference stays eager. Enabling selects native no-MSA batching, including singletons. CPU/deterministic mode stays eager.",
 )
 @click.option(
     "--reuse_diffusion_window_masks",

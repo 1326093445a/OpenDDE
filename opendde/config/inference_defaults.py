@@ -22,6 +22,8 @@ inference_configs: dict[str, Any] = {
     "num_workers": 0,
     "batch_size": 1,
     "use_msa": True,
+    # Retain the validated eager caches/fusions. These do not enable torch.compile
+    # or CUDA replay; later experiments must not change the default execution path.
     "enable_tf32": False,
     "enable_efficient_fusion": True,
     "enable_diffusion_shared_vars_cache": True,

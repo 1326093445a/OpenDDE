@@ -102,6 +102,11 @@ def main():
     )
     parser.add_argument("--diffusion-cuda-graph", action="store_true")
     parser.add_argument("--compile-diffusion-blocks", action="store_true")
+    parser.add_argument(
+        "--compile-pairformer-blocks",
+        action="store_true",
+        help="Benchmark-only main-trunk compilation with cuEquivariance; changes BF16 predictions. Diffusion and confidence remain eager.",
+    )
     parser.add_argument("--cache-atom-aggregation", action="store_true")
     args = parser.parse_args()
     if (
@@ -110,12 +115,13 @@ def main():
                 args.diffusion_cuda_graph,
                 args.compile_diffusion_transitions,
                 args.compile_diffusion_blocks,
+                args.compile_pairformer_blocks,
             )
         )
         > 1
     ):
         parser.error(
-            "Test CUDA replay, transition compilation and block compilation separately."
+            "Test CUDA replay, diffusion compilation and Pairformer compilation separately."
         )
     if args.repeats < 2:
         parser.error("Use at least two measured passes for repeatability.")
@@ -130,6 +136,15 @@ def main():
         from scripts.diffusion_compile_experiment import compiled_diffusion_transitions
     if args.compile_diffusion_blocks:
         from scripts.diffusion_compile_experiment import compiled_diffusion_blocks
+    if args.compile_pairformer_blocks:
+        if (
+            args.trimul_kernel not in ("auto", "cuequivariance")
+            or args.cache_atom_aggregation
+        ):
+            parser.error(
+                "Test Pairformer compilation separately with auto/cuequivariance triangle multiplication."
+            )
+        from scripts.pairformer_compile_experiment import compiled_pairformer_blocks
     if args.cache_atom_aggregation:
         from scripts.diffusion_compile_experiment import cached_atom_aggregation
 
@@ -212,12 +227,18 @@ def main():
             else nullcontext({"enabled": False, "modules": 0, "compiled_calls": 0})
         ) as compile_stats,
         (
+            compiled_pairformer_blocks(runner.model.pairformer_stack)
+            if args.compile_pairformer_blocks
+            else nullcontext({"enabled": False, "modules": 0, "compiled_calls": 0})
+        ) as pairformer_stats,
+        (
             cached_atom_aggregation()
             if args.cache_atom_aggregation
             else nullcontext(None)
         ) as aggregation_stats,
     ):
         report["diffusion_compilation"] = compile_stats
+        report["pairformer_compilation"] = pairformer_stats
         report["aggregation_cache"] = aggregation_stats
         if args.pad_trunk_to:
             # Diagnostic-only hooks: change trunk shape while holding inputs,
@@ -305,6 +326,7 @@ def main():
             elapsed = time.perf_counter() - start
             record = {
                 "diffusion_compilation": dict(compile_stats),
+                "pairformer_compilation": dict(pairformer_stats),
                 "diffusion_graph": dict(
                     getattr(runner.model, "last_diffusion_graph_stats", {})
                 ),
@@ -347,6 +369,7 @@ def main():
                         "peak_gib": record["peak_gib"],
                         "repeat_differences": len(record.get("repeat_differences", [])),
                         "compiled_calls": compile_stats["compiled_calls"],
+                        "pairformer_compiled_calls": pairformer_stats["compiled_calls"],
                         "graph_replays": record["diffusion_graph"].get("replays", 0),
                     }
                 ),
