@@ -5,6 +5,7 @@
 from __future__ import annotations
 
 import time
+import math
 from typing import Any
 
 import torch
@@ -19,10 +20,40 @@ logger = get_logger(__name__)
 
 
 def validate_prediction(
-    prediction: dict[str, Any], *, n_atom: int, n_token: int, n_sample: int
+    prediction: dict[str, Any],
+    *,
+    n_atom: int,
+    n_token: int,
+    n_sample: int,
+    early_stop_threshold: float | None = None,
 ) -> None:
     """Validate explicit output axes before any file for this job is published."""
     coordinate = prediction["coordinate"]
+    actual = coordinate.shape[0] if coordinate.ndim == 3 else -1
+    if actual != n_sample:
+        info = prediction.get("sampling_early_stop", {})
+        score = info.get("first_sample_score")
+        valid_stop = (
+            early_stop_threshold is not None
+            and n_sample > 1
+            and actual == 1
+            and info.get("stopped") is True
+            and info.get("metric") == "ipsae_min_10"
+            and info.get("reason") == "first_sample_below_threshold"
+            and info.get("threshold") == early_stop_threshold
+            and info.get("requested_samples") == n_sample
+            and info.get("completed_samples") == 1
+            and info.get("skipped_samples") == n_sample - 1
+            and isinstance(score, (int, float))
+            and math.isfinite(score)
+            and 0 <= score <= 1
+            and (score == 0 or score < early_stop_threshold)
+        )
+        if not valid_stop:
+            raise ValueError(
+                "Unexpected sample shortfall without a valid enabled early-stop decision"
+            )
+        n_sample = actual
     if tuple(coordinate.shape) != (n_sample, n_atom, 3):
         raise ValueError(
             f"Unexpected per-job coordinate shape: {tuple(coordinate.shape)}"
@@ -140,6 +171,27 @@ def infer_predict_batched(runner, configs) -> None:
         logger.error(message)
         _append_error_report(runner.error_dir, f"{data['sample_name']}.txt", message)
 
+    def submit(data, atom_array, seed, prediction):
+        validate_prediction(
+            prediction,
+            n_atom=len(atom_array),
+            n_token=int(data["N_token"].item()),
+            n_sample=configs.sample_diffusion.N_sample,
+            early_stop_threshold=configs.infer_setting.get(
+                "early_stop_ipsae_threshold"
+            ),
+        )
+        runner.dumper.dump(
+            group_name="",
+            pdb_id=data["sample_name"],
+            seed=seed,
+            pred_dict=prediction,
+            atom_array=atom_array,
+            entity_poly_type={
+                k: v for k, v in data["entity_poly_type"].items() if v != "non-polymer"
+            },
+        )
+
     def predict(items):
         start = time.monotonic()
         predictions = None
@@ -187,24 +239,7 @@ def infer_predict_batched(runner, configs) -> None:
                 items, predictions, strict=True
             ):
                 try:
-                    validate_prediction(
-                        prediction,
-                        n_atom=len(atom_array),
-                        n_token=int(data["N_token"].item()),
-                        n_sample=configs.sample_diffusion.N_sample,
-                    )
-                    runner.dumper.dump(
-                        group_name="",
-                        pdb_id=data["sample_name"],
-                        seed=seed,
-                        pred_dict=prediction,
-                        atom_array=atom_array,
-                        entity_poly_type={
-                            k: v
-                            for k, v in data["entity_poly_type"].items()
-                            if v != "non-polymer"
-                        },
-                    )
+                    submit(data, atom_array, seed, prediction)
                     completed += 1
                 except Exception as exc:
                     report(data, seed, exc)
@@ -228,39 +263,48 @@ def infer_predict_batched(runner, configs) -> None:
         # Reuse allocator blocks for the next similarly-sized batch. OOM retry
         # above still releases cached memory before splitting the work.
 
-    pending = []
-    bucket = None
-    for seed in dict.fromkeys(seed for seeds in schedule for seed in seeds):
-        # Sort by approximate sequence length before sharding; exact token/atom
-        # metadata remains authoritative after featurization.
-        def estimated_size(index):
-            return sum(
-                len(next(iter(entity.values())).get("sequence", ""))
-                * next(iter(entity.values())).get("count", 1)
-                for entity in jobs[index]["sequences"]
-            )
+    def prepared_jobs():
+        for seed in dict.fromkeys(seed for seeds in schedule for seed in seeds):
+            # Sort by approximate sequence length before sharding; exact token/atom
+            # metadata remains authoritative after featurization.
+            def estimated_size(index):
+                return sum(
+                    len(next(iter(entity.values())).get("sequence", ""))
+                    * next(iter(entity.values())).get("count", 1)
+                    for entity in jobs[index]["sequences"]
+                )
 
-        loader.sampler.set_sample_indices(
-            sorted(
-                (i for i, seeds in enumerate(schedule) if seed in seeds),
-                key=estimated_size,
+            loader.sampler.set_sample_indices(
+                sorted(
+                    (i for i, seeds in enumerate(schedule) if seed in seeds),
+                    key=estimated_size,
+                )
             )
-        )
-        iterator = iter(loader)
-        while True:
-            seed_everything(seed=seed, deterministic=configs.deterministic)
-            try:
-                batch = next(iterator)
-            except StopIteration:
-                break
-            data, atom_array, error = _prepare_inference_batch(batch)
-            owned = _sampler_owns_inference_sample(loader.sampler, data)
-            if error:
-                if owned or int(data.get("sample_index", -1)) == -1:
-                    report(data, seed, ValueError(error))
-                continue
-            if not owned:
-                continue
+            iterator = iter(loader)
+            while True:
+                seed_everything(seed=seed, deterministic=configs.deterministic)
+                try:
+                    batch = next(iterator)
+                except StopIteration:
+                    break
+                data, atom_array, error = _prepare_inference_batch(batch)
+                owned = _sampler_owns_inference_sample(loader.sampler, data)
+                if error:
+                    if owned or int(data.get("sample_index", -1)) == -1:
+                        report(data, seed, ValueError(error))
+                    continue
+                if not owned:
+                    continue
+                yield data, atom_array, seed
+
+    if configs.infer_setting.get("batch_refill", False):
+        from runner.refill_prediction import run_refill_sessions
+
+        run_refill_sessions(runner, configs, prepared_jobs(), submit, report)
+    else:
+        pending = []
+        bucket = None
+        for data, atom_array, seed in prepared_jobs():
             current = _precision_bucket(int(data["N_token"].item()))
             sizes = [_batch_token_sizes(item[0]) for item in pending]
             sizes.append(_batch_token_sizes(data))
@@ -286,8 +330,8 @@ def infer_predict_batched(runner, configs) -> None:
             if len(pending) == configs.batch_size:
                 predict(pending)
                 pending = []
-    if pending:
-        predict(pending)
+        if pending:
+            predict(pending)
     if errors:
         raise RuntimeError(
             f"{len(errors)} inference job/seed(s) failed. First error: {errors[0]}"

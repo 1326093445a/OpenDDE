@@ -124,7 +124,7 @@ def test_ragged_sampler_preserves_each_jobs_random_stream(chunk):
 
 
 def test_batch_validation_keeps_single_job_compatible_and_rejects_unsupported_modes():
-    cfg = build_inference_config()
+    cfg = build_inference_config(arg_str="--batch_size 1 --use_msa true")
     validate_input_batching(cfg)
     cfg.batch_size = 2
     with pytest.raises(ValueError, match="use_msa"):
@@ -242,6 +242,7 @@ def _toy_config():
                 "--model.diffusion_module.transformer.n_heads 4",
                 "--model.diffusion_module.atom_decoder.n_blocks 1 --model.confidence_head.n_blocks 1",
                 "--sample_diffusion.N_sample 3 --sample_diffusion.N_step 4",
+                "--infer_setting.confidence_sample_chunk_size 1",
             ]
         )
     )

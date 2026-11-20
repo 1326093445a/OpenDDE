@@ -8,8 +8,15 @@ with `opendde pred`, which does not accept this FASTA as prediction input.
 
 [`replay_smoke.json`](replay_smoke.json) is the first two jobs from this fixture
 set (64 and 96 residues total), for a small native batching/CUDA replay example.
-See the [main README commands](../../../README.md#small-batching-and-replay-example)
-for both the replay run and a matching native eager comparison.
+See the [main README commands](../../../README.md#default-eager-batching-example)
+for eager inference and optional replay.
+
+[`flashpairformer_smoke.json`](flashpairformer_smoke.json) selects the existing
+128- and 192-residue jobs, above the default TMK3 backend's 100-token cutoff.
+Use the [FlashPairformer eager command](../../../README.md#optional-flashpairformer-with-eager-inference)
+to combine TMK3 multiplication, cuEquivariance attention and the existing caches
+with replay and compilation off. The 64/96-residue replay fixture would use
+the short-sequence fallback instead of demonstrating TMK3.
 
 These are execution and memory fixtures, not known interacting proteins or a
 structure-accuracy benchmark. Sequences were generated locally with Python's
@@ -142,3 +149,11 @@ the retry path before the attention allocation fix.
 These are execution and numerical-consistency checks. Full 200-step/10-recycle
 prediction quality, throughput gains, MPS batching and batches with external
 features have not been validated by these runs.
+
+## Optional screening/refill fixture
+
+`refill_smoke.json` repeats the 128-residue synthetic two-chain complex with four
+independent seeds (101–104). It provides equal residue and structural-token
+counts for fixed-slot refill. Use the [screening/refill command](../../../docs/inference_instructions.md#optional-first-sample-screening-and-batch-refill);
+both sample chunk sizes must be one, and more than one sample must be requested.
+The cutoff changes which samples are generated and is not an accuracy guarantee.

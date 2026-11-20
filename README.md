@@ -189,6 +189,7 @@ opendde pred \
   -i tiny.json \
   -o ./output \
   -n opendde_v1 \
+  --trimul_kernel torch --triatt_kernel torch \
   --use_msa false \
   --use_template false \
   --use_rna_msa false \
@@ -197,10 +198,10 @@ opendde pred \
   --cycle 10
 ```
 
-Defaults are applied automatically: inference runs in `bf16` with TF32 off, triangle kernels
-use `auto` dispatch, and seeds come from the job's `modelSeeds` unless `--seeds`
-is provided. On CPU this example may be slow, but it avoids GPU-only kernels and
-large search databases.
+Inference defaults to `bf16` with TF32 off, TMK3 multiplication, cuEquivariance
+attention, and diffusion/confidence chunks of five. Seeds come from the job's
+`modelSeeds` unless `--seeds` is provided. The compatibility example above explicitly
+uses Torch kernels so it also works without the optional CUDA dependencies.
 
 Outputs are written under:
 
@@ -215,12 +216,13 @@ see the inference guide for details.
 
 ## Optimized No-MSA Inference
 
-**The default is the validated pre-replay eager baseline:** BF16 mixed
-precision, automatic triangle-kernel selection, reference diffusion attention,
-and the existing conditioning/projection caches and eager fusions. CUDA replay
-is off; compiler experiments are available only through benchmark scripts.
-The length-dependent precision policy is unchanged: diffusion and confidence
-stay FP32 through 2,560 tokens. No Torch upgrade is needed.
+**The default generates all five samples:** Torch LayerNorm, TMK3 triangle
+multiplication, cuEquivariance triangle attention, and diffusion/confidence
+chunks of five. Early stopping, batch refill and CUDA replay are off. BF16 mixed
+precision, reference diffusion attention and existing caches/fusions remain in
+use; compiler experiments stay benchmark-only. The length-dependent precision
+policy is unchanged. Install the [GPU kernel dependencies](docs/kernels.md#optional-tmk3-triangle-multiplication)
+for the default CUDA path; no Torch upgrade is needed.
 
 | Improvement | How to use it |
 | --- | --- |
@@ -229,34 +231,33 @@ stay FP32 through 2,560 tokens. No Torch upgrade is needed.
 | Ordered atom aggregation for repeatable CUDA inference | Enabled in the ordinary CUDA inference path; historical BF16 predictions can change |
 | Grouped ipSAE for selected protein-chain interfaces | Supported through each job's `ipsae_interface`; existing jobs keep their scoring behavior |
 | Efficient diffusion attention layout | Opt in with `--diffusion_attention_backend efficient`; floating-point outputs can change |
-| TMK3 triangle multiplication | Opt in with `--trimul_kernel flashpairformer` after installing the optional backend; see the [kernel guide](docs/kernels.md) |
+| TMK3 triangle multiplication | Default `--trimul_kernel flashpairformer`; requires the optional GPU backend dependencies. Explicit `auto`, `cuequivariance` and `torch` overrides remain available. |
 | Complete-denoiser CUDA replay with cached atom-aggregation plans | Opt in with `--diffusion_cuda_graph true`; defaults off |
+| First-sample ipSAE screening and equal-length batch refill | Optional `--early_stop_ipsae_threshold` and `--batch_refill true`; see the [screening command and constraints](docs/inference_instructions.md#optional-first-sample-screening-and-batch-refill). Requires multiple samples to save work. |
 | Diffusion or Pairformer compilation | Benchmark-only; never enabled by prediction defaults |
 
 ### Default eager batching example
 
-Run from the repository root after installing this checkout and preparing the
-checkpoint and common runtime data. The supplied
-[`replay_smoke.json`](examples/cofold/no_msa_batch/replay_smoke.json) contains two
-synthetic two-chain complexes with **64 and 96 total residues**, each with seed
-101. These are execution fixtures, not a structure-accuracy benchmark; they
-need no MSA/template search databases.
+Run from the repository root after installing the GPU kernel dependencies and
+preparing the checkpoint and common runtime data. The supplied
+[`flashpairformer_smoke.json`](examples/cofold/no_msa_batch/flashpairformer_smoke.json)
+contains two synthetic two-chain complexes with **128 and 192 total residues**,
+each with seed 101. These are execution fixtures, not an accuracy benchmark.
 
 ```bash
 CUDA_VISIBLE_DEVICES=0 LAYERNORM_TYPE=torch python -m runner.batch_inference pred \
-  -i examples/cofold/no_msa_batch/replay_smoke.json \
+  -i examples/cofold/no_msa_batch/flashpairformer_smoke.json \
   -o ./output/eager_example \
-  --device cuda --dtype bf16 \
+  --device cuda \
   --use_msa false --use_template false --use_rna_msa false \
-  --batch_size 2 --sample 1 --cycle 10 --step 200
+  --batch_size 2 --cycle 10 --step 200
 ```
 
-This requests two complexes per forward and one predicted structure per complex.
-Each job keeps its own CIF and confidence outputs under
-`output/eager_example/<job_name>/seed_101/`. For a quick execution check, use
-`--cycle 1 --step 20`. The fixture's filename predates this default policy;
-it does not enable replay. The example explicitly selects a batch limit of two
-and one sample; CLI defaults remain `--batch_size 1` and `--sample 5`.
+This uses TMK3 multiplication, cuEquivariance attention and chunks of five without
+extra kernel flags. It generates **five structures per complex**, with separate
+CIF and confidence outputs under `output/eager_example/<job_name>/seed_101/`.
+For a quick execution check, reduce cycles/steps. The batch limit is explicitly
+two; the CLI default remains one. Screening, refill and replay are disabled.
 
 Different lengths are supported, but padding can change BF16 predictions.
 Keep grouping fixed for reproducibility, and use the padding-ratio and pair-token
@@ -264,6 +265,39 @@ limits described in the [batching guide](docs/inference_instructions.md#multiple
 when larger batches waste work or exceed memory. See the
 [default/optional settings](docs/inference_instructions.md#default-inference-baseline)
 for the complete policy.
+
+<a id="optional-flashpairformer-with-eager-inference"></a>
+
+### Explicit FlashPairformer settings
+
+Use **TMK3 triangle multiplication + cuEquivariance triangle attention**, with
+the existing caches/fusions, reference diffusion attention and replay disabled.
+This does not compile the model or change LayerNorm or the precision policy.
+Install the optional backend using the [kernel guide](docs/kernels.md#optional-tmk3-triangle-multiplication)
+if it is not already available; no Torch upgrade is required.
+
+The supplied [FlashPairformer fixture](examples/cofold/no_msa_batch/flashpairformer_smoke.json)
+contains the existing 128- and 192-residue synthetic jobs, both above TMK3's
+100-token dispatch cutoff:
+
+```bash
+CUDA_VISIBLE_DEVICES=0 LAYERNORM_TYPE=torch python -m runner.batch_inference pred \
+  -i examples/cofold/no_msa_batch/flashpairformer_smoke.json \
+  -o ./output/flashpairformer_eager \
+  --device cuda --dtype bf16 \
+  --use_msa false --use_template false --use_rna_msa false \
+  --trimul_kernel flashpairformer --triatt_kernel cuequivariance \
+  --enable_cache true --enable_fusion true --enable_tf32 false \
+  --diffusion_attention_backend reference --diffusion_cuda_graph false \
+  --batch_size 2 --sample 5 --cycle 10 --step 200 \
+  --sample_diffusion_chunk_size 5 --confidence_sample_chunk_size 5
+```
+
+Replace the input path with your jobs and choose the batch limit for your
+workload. Keep grouping fixed for comparisons. FP32 confidence retains its
+fallback kernels; TMK3 does not force it to BF16. These explicit settings match
+the new defaults. Confidence chunks of five can use more peak memory than one;
+lower the chunk size explicitly when needed and keep it fixed for comparisons.
 
 ### Optional replay and compiler experiments
 

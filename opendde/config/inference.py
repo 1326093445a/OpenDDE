@@ -109,10 +109,42 @@ def validate_config_triangle_kernels(configs: OpenDDEConfig) -> None:
     )
 
 
+def validate_early_stopping(configs):
+    settings = configs.infer_setting
+    threshold = settings.get("early_stop_ipsae_threshold")
+    if settings.get("batch_refill", False):
+        if (
+            configs.batch_size < 2
+            or threshold is None
+            or configs.sample_diffusion.N_sample <= 1
+        ):
+            raise ValueError(
+                "batch_refill requires batch_size > 1, early_stop_ipsae_threshold and N_sample > 1"
+            )
+    if threshold is None:
+        return
+    if (
+        isinstance(threshold, bool)
+        or not isinstance(threshold, (int, float))
+        or not math.isfinite(threshold)
+        or not 0 <= threshold <= 1
+    ):
+        raise ValueError(
+            "early_stop_ipsae_threshold must be finite and in [0, 1], or None"
+        )
+    if configs.sample_diffusion.N_sample > 1:
+        for key in ("sample_diffusion_chunk_size", "confidence_sample_chunk_size"):
+            if settings[key] != 1:
+                raise ValueError(
+                    f"First-sample screening requires infer_setting.{key}=1"
+                )
+
+
 def validate_input_batching(
     configs: OpenDDEConfig, *, batch_size: int | None = None
 ) -> None:
     """Reject unsupported batching combinations before loading assets or weights."""
+    validate_early_stopping(configs)
     size = getattr(configs, "batch_size", 1) if batch_size is None else batch_size
     if size < 1:
         raise ValueError("batch_size must be at least 1.")
@@ -126,7 +158,11 @@ def validate_input_batching(
         or pair_budget < 0
     ):
         raise ValueError("batch_max_pair_tokens must be a nonnegative integer")
-    if size == 1 and not getattr(configs.infer_setting, "diffusion_cuda_graph", False):
+    if (
+        size == 1
+        and not getattr(configs.infer_setting, "diffusion_cuda_graph", False)
+        and configs.infer_setting.get("early_stop_ipsae_threshold") is None
+    ):
         return
     incompatible = []
     for key in ("use_msa", "use_template", "use_rna_msa"):
@@ -146,7 +182,7 @@ def validate_input_batching(
         incompatible.append("OPENDDE_TRUNK_CACHE")
     if incompatible:
         raise ValueError(
-            "Native batching (batch_size > 1 or diffusion_cuda_graph) does not support: "
+            "Native batching (batch_size > 1, diffusion_cuda_graph, or first-sample screening) does not support: "
             + ", ".join(incompatible)
         )
 

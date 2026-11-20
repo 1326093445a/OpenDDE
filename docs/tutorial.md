@@ -43,14 +43,16 @@ Template/RNA-MSA preprocessing also needs `hmmer`; template inference may need
 ## 2. Compatibility prediction
 
 This disables external features and keeps the standard step/cycle counts.
-Inference defaults to `bf16` (TF32 off) and `auto` triangle kernels (PyTorch on CPU), so no
-extra dtype or kernel flags are needed:
+Inference defaults to `bf16` (TF32 off), TMK3 multiplication and cuEquivariance
+attention. This compatibility command explicitly uses Torch kernels so it also
+works without the optional CUDA dependencies:
 
 ```bash
 opendde pred \
   -i examples/cofold/input.json \
   -o ./output \
   -n opendde_v1 \
+  --trimul_kernel torch --triatt_kernel torch \
   --use_msa false \
   --use_template false \
   --use_rna_msa false \

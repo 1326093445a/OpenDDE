@@ -166,8 +166,12 @@ class InferSettingConfig(BaseConfig):
     # keys are token-count thresholds ("1024", "1536", ...) -> not identifiers
     chunk_size_thresholds: dict[str, int]
     sample_diffusion_chunk_size: Optional[int]
-    confidence_sample_chunk_size: Optional[int] = 1
-    batch_max_padding_ratio: float = Field(default=0.0, ge=0, allow_inf_nan=False)
+    confidence_sample_chunk_size: Optional[int] = 5
+    early_stop_ipsae_threshold: Optional[float] = Field(
+        default=None, ge=0, le=1, allow_inf_nan=False
+    )
+    batch_refill: bool = False
+    batch_max_padding_ratio: float = Field(default=1.0, ge=0, allow_inf_nan=False)
     batch_max_pair_tokens: int = Field(default=0, ge=0)
     diffusion_cache_max_mb: int = Field(default=2048, ge=0)
     share_diffusion_sample_conditioning: bool = True
@@ -362,7 +366,7 @@ class OpenDDEConfig(BaseConfig):
     input_json_path: Optional[str]
     load_checkpoint_dir: str
     num_workers: int
-    batch_size: int = 1
+    batch_size: int = 2
     use_msa: bool
     msa_pair_as_unpair: bool
     use_template: bool

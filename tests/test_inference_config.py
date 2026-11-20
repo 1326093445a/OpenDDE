@@ -59,8 +59,8 @@ def test_eager_baseline_and_explicit_opt_ins_agree_across_entry_points(
 
     expected = {
         "dtype": "bf16",
-        "trimul_kernel": "auto",
-        "triatt_kernel": "auto",
+        "trimul_kernel": "flashpairformer",
+        "triatt_kernel": "cuequivariance",
         "enable_cache": True,
         "enable_fusion": True,
         "enable_tf32": False,
@@ -69,16 +69,23 @@ def test_eager_baseline_and_explicit_opt_ins_agree_across_entry_points(
         "diffusion_cache_max_mb": 2048,
         "share_diffusion_sample_conditioning": True,
         "reuse_diffusion_window_masks": True,
-        "confidence_sample_chunk_size": 1,
-        "batch_size": 1,
-        "batch_max_padding_ratio": 0.0,
+        "confidence_sample_chunk_size": 5,
+        "sample_diffusion_chunk_size": 5,
+        "early_stop_ipsae_threshold": None,
+        "batch_refill": False,
+        "batch_size": 2,
+        "use_msa": False,
+        "batch_max_padding_ratio": 1.0,
         "batch_max_pair_tokens": 0,
         "n_sample": 5,
     }
     overrides = (
         {
             "dtype": "fp32",
-            "trimul_kernel": "flashpairformer",
+            "trimul_kernel": "auto",
+            "triatt_kernel": "auto",
+            "confidence_sample_chunk_size": 1,
+            "sample_diffusion_chunk_size": 1,
             "diffusion_attention_backend": "efficient",
             "diffusion_cuda_graph": True,
         }
@@ -101,6 +108,9 @@ def test_eager_baseline_and_explicit_opt_ins_agree_across_entry_points(
                 "share_diffusion_sample_conditioning",
                 "reuse_diffusion_window_masks",
                 "confidence_sample_chunk_size",
+                "sample_diffusion_chunk_size",
+                "early_stop_ipsae_threshold",
+                "batch_refill",
                 "batch_max_padding_ratio",
                 "batch_max_pair_tokens",
             )
@@ -421,7 +431,10 @@ def test_mps_device_downgrades_bf16_below_macos_14(monkeypatch):
     monkeypatch.setattr(
         torch.backends.mps, "is_macos_or_newer", lambda major, minor: False
     )
-    cfg = build_inference_config(arg_str="--dtype bf16", fill_required_with_null=True)
+    cfg = build_inference_config(
+        arg_str="--dtype bf16 --triangle_attention auto --triangle_multiplicative auto",
+        fill_required_with_null=True,
+    )
 
     assert apply_runtime_compatibility(cfg, torch.device("mps")).dtype == "fp32"
 
@@ -525,6 +538,7 @@ def test_distributed_flashpairformer_is_rejected_before_probing(monkeypatch):
     import opendde.config.inference as inference_config
 
     cfg = build_inference_config(fill_required_with_null=True)
+    cfg.batch_size = 1
     cfg.foldcp_mode = "distributed"
     cfg.triangle_multiplicative = "flashpairformer"
     cfg.triangle_attention = "torch"
@@ -541,6 +555,7 @@ def test_distributed_auto_triangle_kernels_resolve_to_torch(monkeypatch):
     import opendde.config.inference as inference_config
 
     cfg = build_inference_config(fill_required_with_null=True)
+    cfg.batch_size = 1
     cfg.foldcp_mode = "distributed"
     cfg.foldcp_size_dp = 1
     cfg.foldcp_size_cp = 4
@@ -577,6 +592,7 @@ def test_distributed_explicit_cuequivariance_is_rejected(
     import opendde.config.inference as inference_config
 
     cfg = build_inference_config(fill_required_with_null=True)
+    cfg.batch_size = 1
     cfg.foldcp_mode = "distributed"
     cfg.foldcp_size_dp = 1
     cfg.foldcp_size_cp = 4
@@ -1322,9 +1338,15 @@ def test_padding_only_cp_ranks_use_serial_model_and_restore_environment(monkeypa
     configs = SimpleNamespace()
     foldcp = FoldCPConfig.from_runtime_args(mode="distributed", size_dp=1, size_cp=4)
     previous = {key: os.environ.get(key) for key in FOLDCP_ENVIRONMENT_KEYS}
-    apply_foldcp_config(configs, foldcp)
 
-    try:
+    # Register the original environment before apply_foldcp_config mutates it.
+    # Using monkeypatch only in cleanup would record the distributed values and
+    # restore those again at fixture teardown, leaking them into later tests.
+    with monkeypatch.context() as environment:
+        for key in FOLDCP_ENVIRONMENT_KEYS:
+            environment.setenv(key, os.environ.get(key, ""))
+        apply_foldcp_config(configs, foldcp)
+
         with use_serial_model_when_cp_has_padding_only_ranks(foldcp, 2) as active:
             assert active is True
             assert os.environ["OPENDDE_FOLDCP_MODE"] == "single"
@@ -1344,12 +1366,8 @@ def test_padding_only_cp_ranks_use_serial_model_and_restore_environment(monkeypa
                 raise RuntimeError("model failed")
         assert os.environ["OPENDDE_FOLDCP_MODE"] == "distributed"
         assert os.environ["OPENDDE_FOLDCP_SIZE_CP"] == "4"
-    finally:
-        for key, value in previous.items():
-            if value is None:
-                monkeypatch.delenv(key, raising=False)
-            else:
-                monkeypatch.setenv(key, value)
+
+    assert {key: os.environ.get(key) for key in FOLDCP_ENVIRONMENT_KEYS} == previous
 
 
 def test_runner_close_retries_failed_process_group_destruction(monkeypatch):

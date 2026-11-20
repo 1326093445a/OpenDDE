@@ -1,6 +1,26 @@
 # Mixed-length inference and native ipSAE
 
-## Default policy, 2026-11-13
+## Current default policy, 2026-11-20
+
+The default now uses Torch LayerNorm, TMK3 triangle multiplication,
+cuEquivariance triangle attention and diffusion/confidence chunks of five.
+All five samples are generated; early stopping, refill and replay remain off.
+See the [current settings and dependency requirements](inference_instructions.md#default-inference-baseline).
+Measurements below retain their original settings. In particular, benchmark
+scripts may specify older controls; select kernel and confidence chunk settings
+explicitly when reproducing or comparing them.
+
+Default-policy validation: 204 targeted tests passed; four opt-in CUDA ragged
+regressions were skipped in that test invocation. A separate real CUDA CLI run
+used the new defaults on the 128/192-residue fixture at ten recycles and 200 steps,
+with no sample/kernel/chunk overrides. Both jobs produced all five samples:
+ten CIFs, ten summaries and ten full-confidence files, with finite values and
+correct per-job token/atom axes. TMK3's exact path engaged, FP32 confidence used
+its fallback, and no screening completion records were produced. Peak allocated
+memory was 6.967 GiB. This shared-GPU execution check is not a new timing or
+1,900-sample ipSAE benchmark.
+
+## Historical default policy, 2026-11-13 (superseded)
 
 The supported default configuration is the validated **pre-replay eager
 baseline**: BF16 mixed precision with the existing module/length policy,
@@ -689,7 +709,7 @@ and raw confidence logits by at most **0.00000287**. Each variant repeated
 bitwise, including across its two processes. The isolated BF16 kernel parity
 check above did not cover every FP32 confidence kernel tuned by this full run.
 
-**Recommendation:** retain `auto` as the general default. On this tested H200
+**Recommendation at the time of measurement (superseded above):** retain `auto` as the general default. On this tested H200
 workload, either option provides a modest improvement. TMK3 is an opt-in choice
 when retaining default numerics and avoiding on-demand tuning setup matter;
 it needs opt_core and about 0.31 GiB more allocated memory here. A warmed
@@ -730,7 +750,7 @@ sample per complex**. The initial speed measurements used explicitly requested
 The runner keeps diffusion and confidence outside autocast up to 2,560 tokens;
 above that confidence uses autocast, and above 3,840 tokens diffusion does too.
 Efficient attention remains opt-in (`reference` is
-the default). Confidence chunks remain one: increasing the chunk cannot help
+the default). These measurements used confidence chunks of one: increasing the chunk cannot help
 a one-sample request. TMK3 was deferred during the FP32 pass because the available
 adapter requires BF16 compute; the subsequent BF16 port and validation are
 reported above.

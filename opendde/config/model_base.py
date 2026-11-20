@@ -4,6 +4,7 @@
 from typing import Any
 
 from opendde.config.extend_types import (
+    DefaultNoneWithType,
     GlobalConfigValue,
     ListValue,
     ValueMaybeNone,
@@ -28,8 +29,8 @@ model_configs: dict[str, Any] = {
     "sigma_data": 16.0,
     "blocks_per_ckpt": ValueMaybeNone(1),
     "hidden_scale_up": True,
-    "triangle_multiplicative": "auto",
-    "triangle_attention": "auto",
+    "triangle_multiplicative": "flashpairformer",
+    "triangle_attention": "cuequivariance",
     "enable_diffusion_shared_vars_cache": False,
     "enable_efficient_fusion": False,
     "enable_tf32": False,
@@ -50,8 +51,10 @@ model_configs: dict[str, Any] = {
             "2560": 128,
         },
         "sample_diffusion_chunk_size": ValueMaybeNone(5),
-        "confidence_sample_chunk_size": ValueMaybeNone(1),
-        "batch_max_padding_ratio": 0.0,
+        "confidence_sample_chunk_size": ValueMaybeNone(5),
+        "early_stop_ipsae_threshold": DefaultNoneWithType(float),
+        "batch_refill": False,
+        "batch_max_padding_ratio": 1.0,
         "batch_max_pair_tokens": 0,
         "diffusion_cache_max_mb": 2048,
         "share_diffusion_sample_conditioning": True,

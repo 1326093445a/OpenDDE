@@ -1,0 +1,106 @@
+[
+  {
+    "name": "refill_complex_1",
+    "modelSeeds": [
+      101
+    ],
+    "sequences": [
+      {
+        "proteinChain": {
+          "sequence": "INRMKCYQDDLSVRLNECKGCEEHEAMMAYYWNPGKWDDTQITQCFVASWVHRALHITPSFFPG",
+          "count": 1,
+          "id": [
+            "A"
+          ]
+        }
+      },
+      {
+        "proteinChain": {
+          "sequence": "KAQYFYIHANEQEGMPTMHDNGVKTPCRVDEWEWRHVNFWLDFPSLAGAISCCICQTYDMKLRS",
+          "count": 1,
+          "id": [
+            "B"
+          ]
+        }
+      }
+    ]
+  },
+  {
+    "name": "refill_complex_2",
+    "modelSeeds": [
+      102
+    ],
+    "sequences": [
+      {
+        "proteinChain": {
+          "sequence": "INRMKCYQDDLSVRLNECKGCEEHEAMMAYYWNPGKWDDTQITQCFVASWVHRALHITPSFFPG",
+          "count": 1,
+          "id": [
+            "A"
+          ]
+        }
+      },
+      {
+        "proteinChain": {
+          "sequence": "KAQYFYIHANEQEGMPTMHDNGVKTPCRVDEWEWRHVNFWLDFPSLAGAISCCICQTYDMKLRS",
+          "count": 1,
+          "id": [
+            "B"
+          ]
+        }
+      }
+    ]
+  },
+  {
+    "name": "refill_complex_3",
+    "modelSeeds": [
+      103
+    ],
+    "sequences": [
+      {
+        "proteinChain": {
+          "sequence": "INRMKCYQDDLSVRLNECKGCEEHEAMMAYYWNPGKWDDTQITQCFVASWVHRALHITPSFFPG",
+          "count": 1,
+          "id": [
+            "A"
+          ]
+        }
+      },
+      {
+        "proteinChain": {
+          "sequence": "KAQYFYIHANEQEGMPTMHDNGVKTPCRVDEWEWRHVNFWLDFPSLAGAISCCICQTYDMKLRS",
+          "count": 1,
+          "id": [
+            "B"
+          ]
+        }
+      }
+    ]
+  },
+  {
+    "name": "refill_complex_4",
+    "modelSeeds": [
+      104
+    ],
+    "sequences": [
+      {
+        "proteinChain": {
+          "sequence": "INRMKCYQDDLSVRLNECKGCEEHEAMMAYYWNPGKWDDTQITQCFVASWVHRALHITPSFFPG",
+          "count": 1,
+          "id": [
+            "A"
+          ]
+        }
+      },
+      {
+        "proteinChain": {
+          "sequence": "KAQYFYIHANEQEGMPTMHDNGVKTPCRVDEWEWRHVNFWLDFPSLAGAISCCICQTYDMKLRS",
+          "count": 1,
+          "id": [
+            "B"
+          ]
+        }
+      }
+    ]
+  }
+]

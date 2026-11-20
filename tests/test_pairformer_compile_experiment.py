@@ -19,6 +19,13 @@ from scripts.pairformer_compile_experiment import (
 )
 
 
+@pytest.fixture(autouse=True)
+def single_device_environment(monkeypatch):
+    # Each test selects its own execution mode, independent of the launching
+    # shell or other tests. The Fold-CP rejection test overrides this explicitly.
+    monkeypatch.setenv("OPENDDE_FOLDCP_MODE", "single")
+
+
 def make_stack(device="cpu", width=32):
     seed_everything(91, False)
     stack = (

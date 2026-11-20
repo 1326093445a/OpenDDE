@@ -198,6 +198,12 @@ class DataDumper:
                 sorted_indices=sorted_indices,
                 atom_array=atom_array,
             )
+            if "sampling_early_stop" in pred_dict:
+                save_json(
+                    {**pred_dict["sampling_early_stop"], "status": "complete"},
+                    os.path.join(staging_dir, "sampling_status.json"),
+                    indent=4,
+                )
             self._replace_prediction_directory(staging_dir, prediction_save_dir)
             staging_dir = ""
         finally:

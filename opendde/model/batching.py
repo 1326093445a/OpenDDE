@@ -10,6 +10,7 @@ This avoids interpreting padding as atoms or a job dimension as samples.
 from __future__ import annotations
 
 from typing import Any
+from contextlib import contextmanager
 
 import numpy as np
 import torch
@@ -298,13 +299,26 @@ def sample_diffusion_batch(
     gamma_min,
     noise_scale_lambda,
     step_scale_eta,
+    generators=None,
+    numpy_rngs=None,
+    first_sample_callback=None,
 ):
     """Same unguided Euler sampler as B=1, with independent unpadded RNG streams."""
-    generators = [
-        torch.Generator(device=state[1].device).manual_seed(seed)
-        for state, seed in zip(states, seeds, strict=True)
-    ]
-    numpy_rngs = [np.random.default_rng(seed) for seed in seeds]
+    generators = (
+        generators
+        if generators is not None
+        else [
+            torch.Generator(device=state[1].device).manual_seed(seed)
+            for state, seed in zip(states, seeds, strict=True)
+        ]
+    )
+    numpy_rngs = (
+        numpy_rngs
+        if numpy_rngs is not None
+        else [np.random.default_rng(seed) for seed in seeds]
+    )
+    if first_sample_callback is not None and chunk_size != 1:
+        raise ValueError("First-sample screening requires sample chunk size 1")
     outputs: list[list[torch.Tensor]] = [[] for _ in states]
     chunk_size = chunk_size or n_sample
     # Avoid a scalar CUDA synchronization for every input at every step.
@@ -367,10 +381,16 @@ def sample_diffusion_batch(
             ]
         for output, x in zip(outputs, coords, strict=True):
             output.append(x)
+        if (
+            start == 0
+            and first_sample_callback is not None
+            and first_sample_callback(coords)
+        ):
+            break
     return [torch.cat(output, dim=0) for output in outputs]
 
 
-def forward_batch(model, features: list[dict[str, Any]]) -> list[dict[str, Any]]:
+def prepare_batch(model, features: list[dict[str, Any]]):
     """Evaluate independent complexes with shared batched token-network calls."""
     from opendde.model.opendde import update_input_feature_dict
 
@@ -460,128 +480,152 @@ def forward_batch(model, features: list[dict[str, Any]]) -> list[dict[str, Any]]
         seeds.append(int(feat["inference_seed"].item()))
     del structural
 
-    def sample(states, schedules):
-        # The serial sampler's AMP wrapper casts its tensor arguments (not
-        # tensors inside the feature dictionary). Preserve that same boundary
-        # for each ragged member before entering the batched denoiser.
-        sample_states = states
-        sample_schedules = schedules
-        if cfg.skip_amp.sample_diffusion:
-            sample_states = []
-            for feat, s_input, s, z, cache in states:
-                local_cache = dict(cache)
-                local_cache["pair_z"] = (
-                    None if cache["pair_z"] is None else cache["pair_z"].float()
-                )
-                local_cache["p_lm/c_l"] = [
-                    None if x is None else x.float() for x in cache["p_lm/c_l"]
-                ]
-                sample_states.append(
-                    (feat, s_input.float(), s.float(), z.float(), local_cache)
-                )
-            sample_schedules = [x.float() for x in schedules]
-        module = model.diffusion_module
-        static_pair, attention_bias, pair_bias_cache = None, None, None
-        if cfg.enable_diffusion_shared_vars_cache:
-            budget = InferenceCacheBudget.for_device(
-                cfg.infer_setting.diffusion_cache_max_mb,
-                sample_states[0][1].device,
+    return states, schedules, seeds, pair_branches, chunk, kernels
+
+
+def _prepare_sampling(model, states, schedules, chunk):
+    cfg = model.configs
+    # The serial sampler's AMP wrapper casts its tensor arguments (not
+    # tensors inside the feature dictionary). Preserve that same boundary
+    # for each ragged member before entering the batched denoiser.
+    sample_states = states
+    sample_schedules = schedules
+    if cfg.skip_amp.sample_diffusion:
+        sample_states = []
+        for feat, s_input, s, z, cache in states:
+            local_cache = dict(cache)
+            local_cache["pair_z"] = (
+                None if cache["pair_z"] is None else cache["pair_z"].float()
             )
-            for feat, s_input, s, z, cache in sample_states:
-                cache["single_s"] = module.diffusion_conditioning.prepare_single_cache(
-                    s_input, s
-                )
-                if all(value is not None for value in cache["p_lm/c_l"]):
-                    cache["conditioned_atom"] = (
-                        module.atom_attention_encoder.prepare_conditioned_cache(
-                            feat["atom_to_token_idx"],
-                            s.unsqueeze(-3),
-                            *cache["p_lm/c_l"],
-                        )
-                    )
-            if all(state[4]["pair_z"] is not None for state in sample_states):
-                pairs = [state[4]["pair_z"].float() for state in sample_states]
-                if cfg.enable_efficient_fusion:
-                    pairs = [module.normalize(pair) for pair in pairs]
-                static_pair = pad_token_tensors(pairs, pair=True)
-                _, attention_bias = token_masks(
-                    [pair.shape[-2] for pair in pairs],
-                    static_pair,
-                    [
-                        state[0].get("structural_pair_attn_bias")
-                        for state in sample_states
-                    ],
-                )
-                if cfg.enable_efficient_fusion:
-                    static_pair = permute_final_dims(
-                        static_pair, [2, 0, 1]
-                    ).contiguous()
-                # Bound resident projected biases; large inputs keep the
-                # existing streamed projection path instead of risking OOM.
-                transformer = module.diffusion_transformer
-                cache_bytes = (
-                    len(sample_states)
-                    * max(pair.shape[-2] for pair in pairs) ** 2
-                    * transformer.n_heads
-                    * transformer.n_blocks
-                    * 4
-                )
-                if budget.reserve(cache_bytes):
-                    pair_bias_cache = {}
-                del pairs
-            for *_, cache in sample_states:
-                conditioned = cache.get("conditioned_atom")
-                if conditioned is not None:
-                    p_lm, c_l = conditioned
-                    cache["atom_encoder"] = (
-                        module.atom_attention_encoder.atom_transformer.prepare_static_cache(
-                            c_l, p_lm, budget
-                        )
-                    )
-                    cache["atom_decoder"] = (
-                        module.atom_attention_decoder.atom_transformer.prepare_static_cache(
-                            c_l, p_lm, budget
-                        )
-                    )
-        graph_enabled = (
-            getattr(cfg.infer_setting, "diffusion_cuda_graph", False)
-            and not module.training
-        )
-        if graph_enabled and static_pair is None:
-            logger.warning(
-                "Diffusion CUDA graph needs prepared static pair conditioning; "
-                "using eager denoising for this request."
+            local_cache["p_lm/c_l"] = [
+                None if x is None else x.float() for x in cache["p_lm/c_l"]
+            ]
+            sample_states.append(
+                (feat, s_input.float(), s.float(), z.float(), local_cache)
             )
-            graph_enabled = False
-        denoise = lambda x, t: _denoise_batch(
-            module,
-            sample_states,
-            x,
-            t,
-            chunk_size=chunk,
-            fusion=cfg.enable_efficient_fusion,
-            static_pair=static_pair,
-            attention_bias=attention_bias,
-            pair_bias_cache=pair_bias_cache,
-            share_sample_conditioning=cfg.infer_setting.share_diffusion_sample_conditioning,
+        sample_schedules = [x.float() for x in schedules]
+    module = model.diffusion_module
+    static_pair, attention_bias, pair_bias_cache = None, None, None
+    if cfg.enable_diffusion_shared_vars_cache:
+        budget = InferenceCacheBudget.for_device(
+            cfg.infer_setting.diffusion_cache_max_mb,
+            sample_states[0][1].device,
         )
-        with (
-            diffusion_attention_scope(
-                cfg.infer_setting.diffusion_attention_backend,
-                cfg.enable_diffusion_shared_vars_cache
-                and cfg.infer_setting.reuse_diffusion_window_masks,
-                reuse_aggregation_plans=graph_enabled,
-            ),
-            DenoiserGraph(denoise, enabled=graph_enabled) as graph,
+        for feat, s_input, s, z, cache in sample_states:
+            cache["single_s"] = module.diffusion_conditioning.prepare_single_cache(
+                s_input, s
+            )
+            if all(value is not None for value in cache["p_lm/c_l"]):
+                cache["conditioned_atom"] = (
+                    module.atom_attention_encoder.prepare_conditioned_cache(
+                        feat["atom_to_token_idx"],
+                        s.unsqueeze(-3),
+                        *cache["p_lm/c_l"],
+                    )
+                )
+        if all(state[4]["pair_z"] is not None for state in sample_states):
+            pairs = [state[4]["pair_z"].float() for state in sample_states]
+            if cfg.enable_efficient_fusion:
+                pairs = [module.normalize(pair) for pair in pairs]
+            static_pair = pad_token_tensors(pairs, pair=True)
+            _, attention_bias = token_masks(
+                [pair.shape[-2] for pair in pairs],
+                static_pair,
+                [state[0].get("structural_pair_attn_bias") for state in sample_states],
+            )
+            if cfg.enable_efficient_fusion:
+                static_pair = permute_final_dims(static_pair, [2, 0, 1]).contiguous()
+            # Bound resident projected biases; large inputs keep the
+            # existing streamed projection path instead of risking OOM.
+            transformer = module.diffusion_transformer
+            cache_bytes = (
+                len(sample_states)
+                * max(pair.shape[-2] for pair in pairs) ** 2
+                * transformer.n_heads
+                * transformer.n_blocks
+                * 4
+            )
+            if budget.reserve(cache_bytes):
+                pair_bias_cache = {}
+            del pairs
+        for *_, cache in sample_states:
+            conditioned = cache.get("conditioned_atom")
+            if conditioned is not None:
+                p_lm, c_l = conditioned
+                cache["atom_encoder"] = (
+                    module.atom_attention_encoder.atom_transformer.prepare_static_cache(
+                        c_l, p_lm, budget
+                    )
+                )
+                cache["atom_decoder"] = (
+                    module.atom_attention_decoder.atom_transformer.prepare_static_cache(
+                        c_l, p_lm, budget
+                    )
+                )
+    graph_enabled = (
+        getattr(cfg.infer_setting, "diffusion_cuda_graph", False)
+        and not module.training
+    )
+    if graph_enabled and static_pair is None:
+        logger.warning(
+            "Diffusion CUDA graph needs prepared static pair conditioning; "
+            "using eager denoising for this request."
+        )
+        graph_enabled = False
+    denoise = lambda x, t: _denoise_batch(
+        module,
+        sample_states,
+        x,
+        t,
+        chunk_size=chunk,
+        fusion=cfg.enable_efficient_fusion,
+        static_pair=static_pair,
+        attention_bias=attention_bias,
+        pair_bias_cache=pair_bias_cache,
+        share_sample_conditioning=cfg.infer_setting.share_diffusion_sample_conditioning,
+    )
+    return sample_states, sample_schedules, denoise, graph_enabled
+
+
+@contextmanager
+def sampling_session(model, states, schedules, seeds, chunk):
+    """Own conditioning and replay buffers until the fixed set of slots changes."""
+    cfg = model.configs
+    precision = autocasting_disable_decorator(cfg.skip_amp.sample_diffusion)
+    sample_states, sample_schedules, denoise, enabled = precision(_prepare_sampling)(
+        model, states, schedules, chunk
+    )
+    with (
+        diffusion_attention_scope(
+            cfg.infer_setting.diffusion_attention_backend,
+            cfg.enable_diffusion_shared_vars_cache
+            and cfg.infer_setting.reuse_diffusion_window_masks,
+            reuse_aggregation_plans=enabled,
+        ),
+        DenoiserGraph(denoise, enabled=enabled) as graph,
+    ):
+        model.last_diffusion_graph_stats = graph.stats
+
+        @precision
+        def sample(
+            *,
+            n_sample=None,
+            generators=None,
+            numpy_rngs=None,
+            first_sample_callback=None,
         ):
-            model.last_diffusion_graph_stats = graph.stats
             return sample_diffusion_batch(
                 sample_states,
-                graph if graph_enabled else denoise,
+                graph if enabled else denoise,
                 schedules=sample_schedules,
                 seeds=seeds,
-                n_sample=cfg.sample_diffusion.N_sample,
+                n_sample=cfg.sample_diffusion.N_sample
+                if n_sample is None
+                else n_sample,
                 chunk_size=cfg.infer_setting.sample_diffusion_chunk_size,
+                generators=generators,
+                numpy_rngs=numpy_rngs,
+                first_sample_callback=first_sample_callback,
                 **{
                     key: getattr(cfg.sample_diffusion, key)
                     for key in (
@@ -593,38 +637,56 @@ def forward_batch(model, features: list[dict[str, Any]]) -> list[dict[str, Any]]
                 },
             )
 
-    coordinates = autocasting_disable_decorator(cfg.skip_amp.sample_diffusion)(sample)(
-        states, schedules
+        yield sample
+
+
+def run_heads(model, feat, pair, coordinate, chunk, kernels, *, summarize=True):
+    pair_feat, s_input, s, z = pair
+    pred = {"coordinate": coordinate}
+    model.run_distogram_contact_stage(pred_dict=pred, pair_z=z, pair_z_spec=None)
+    model.run_confidence_head_stage(
+        pred_dict=pred,
+        input_feature_dict=pair_feat,
+        s_inputs=s_input,
+        s_trunk=s,
+        z_trunk=z,
+        z_trunk_spec=None,
+        pair_mask=None,
+        x_pred_coords=coordinate,
+        inplace_safe=False,
+        chunk_size=chunk,
+        **kernels,
     )
-    # Release diffusion caches before confidence, which can retain quadratic
-    # per-sample maps. Every subsequent operation owns just one job's metadata.
+    if summarize:
+        summarize_prediction(model, pred, feat, pair)
+    return pred
+
+
+def summarize_prediction(model, pred, feat, pair):
+    model.run_post_confidence_outputs_stage(
+        pred_dict=pred,
+        input_feature_dict=feat,
+        pair_input_feature_dict=pair[0],
+        N_cycle=model.N_cycle,
+    )
+    return pred
+
+
+def forward_batch(model, features: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Evaluate independent complexes with shared batched token-network calls."""
+    from opendde.model.early_stopping import FirstSampleGate
+
+    states, schedules, seeds, pairs, chunk, kernels = prepare_batch(model, features)
     structural_features = [state[0] for state in states]
-    del states, schedules, cache, s_input, s, z
-    predictions = []
-    for feat, pair, coordinate in zip(
-        structural_features, pair_branches, coordinates, strict=True
-    ):
-        pair_feat, s_input, s, z = pair
-        pred = {"coordinate": coordinate}
-        model.run_distogram_contact_stage(pred_dict=pred, pair_z=z, pair_z_spec=None)
-        model.run_confidence_head_stage(
-            pred_dict=pred,
-            input_feature_dict=pair_feat,
-            s_inputs=s_input,
-            s_trunk=s,
-            z_trunk=z,
-            z_trunk_spec=None,
-            pair_mask=None,
-            x_pred_coords=coordinate,
-            inplace_safe=False,
-            chunk_size=chunk,
-            **kernels,
+    gate = FirstSampleGate.create(model, structural_features, pairs, chunk, kernels)
+    with sampling_session(model, states, schedules, seeds, chunk) as sample:
+        coordinates = sample(first_sample_callback=gate)
+    del sample, states, schedules
+    if gate is not None:
+        return [gate.finish(i, coordinate) for i, coordinate in enumerate(coordinates)]
+    return [
+        run_heads(model, feat, pair, coordinate, chunk, kernels)
+        for feat, pair, coordinate in zip(
+            structural_features, pairs, coordinates, strict=True
         )
-        model.run_post_confidence_outputs_stage(
-            pred_dict=pred,
-            input_feature_dict=feat,
-            pair_input_feature_dict=pair_feat,
-            N_cycle=model.N_cycle,
-        )
-        predictions.append(pred)
-    return predictions
+    ]

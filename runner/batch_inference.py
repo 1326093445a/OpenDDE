@@ -372,9 +372,9 @@ def get_default_runner(
     dtype: InferenceDtype = "bf16",
     model_name: str = DEFAULT_MODEL_NAME,
     load_checkpoint_path: str = "",
-    use_msa: bool = True,
-    trimul_kernel="auto",
-    triatt_kernel="auto",
+    use_msa: bool = False,
+    trimul_kernel="flashpairformer",
+    triatt_kernel="cuequivariance",
     enable_cache=True,
     enable_fusion=True,
     enable_tf32=False,
@@ -390,15 +390,18 @@ def get_default_runner(
     foldcp_devices: str = "",
     foldcp_metrics_jsonl: str = "",
     *,
-    batch_size: int = 1,
-    confidence_sample_chunk_size: Optional[int] = 1,
-    batch_max_padding_ratio: float = 0.0,
+    batch_size: int = 2,
+    confidence_sample_chunk_size: Optional[int] = 5,
+    batch_max_padding_ratio: float = 1.0,
     batch_max_pair_tokens: int = 0,
     diffusion_cache_max_mb: int = 2048,
     share_diffusion_sample_conditioning: bool = True,
     diffusion_attention_backend: Literal["reference", "efficient"] = "reference",
     reuse_diffusion_window_masks: bool = True,
     diffusion_cuda_graph: bool = False,
+    sample_diffusion_chunk_size: Optional[int] = 5,
+    early_stop_ipsae_threshold: Optional[float] = None,
+    batch_refill: bool = False,
     device: InferenceDevice = "auto",
 ) -> InferenceRunner:
     """
@@ -507,6 +510,9 @@ def get_default_runner(
     )
     configs.infer_setting.diffusion_attention_backend = diffusion_attention_backend
     configs.infer_setting.diffusion_cuda_graph = diffusion_cuda_graph
+    configs.infer_setting.sample_diffusion_chunk_size = sample_diffusion_chunk_size
+    configs.infer_setting.early_stop_ipsae_threshold = early_stop_ipsae_threshold
+    configs.infer_setting.batch_refill = batch_refill
     configs.infer_setting.reuse_diffusion_window_masks = reuse_diffusion_window_masks
     configs.use_msa = use_msa
     configs.triangle_multiplicative = trimul_kernel
@@ -558,7 +564,7 @@ def get_default_runner(
 def inference_jsons(
     json_file: str,
     out_dir: str = "./output",
-    use_msa: bool = True,
+    use_msa: bool = False,
     seeds: Optional[list[int]] = None,
     n_cycle: int = 10,
     n_step: int = 200,
@@ -566,8 +572,8 @@ def inference_jsons(
     dtype: InferenceDtype = "bf16",
     model_name: str = DEFAULT_MODEL_NAME,
     load_checkpoint_path: str = "",
-    trimul_kernel: str = "auto",
-    triatt_kernel: str = "auto",
+    trimul_kernel: str = "flashpairformer",
+    triatt_kernel: str = "cuequivariance",
     enable_cache: bool = True,
     enable_fusion: bool = True,
     enable_tf32: bool = False,
@@ -594,15 +600,18 @@ def inference_jsons(
     foldcp_devices: str = "",
     foldcp_metrics_jsonl: str = "",
     *,
-    batch_size: int = 1,
-    confidence_sample_chunk_size: Optional[int] = 1,
-    batch_max_padding_ratio: float = 0.0,
+    batch_size: int = 2,
+    confidence_sample_chunk_size: Optional[int] = 5,
+    batch_max_padding_ratio: float = 1.0,
     batch_max_pair_tokens: int = 0,
     diffusion_cache_max_mb: int = 2048,
     share_diffusion_sample_conditioning: bool = True,
     diffusion_attention_backend: Literal["reference", "efficient"] = "reference",
     reuse_diffusion_window_masks: bool = True,
     diffusion_cuda_graph: bool = False,
+    sample_diffusion_chunk_size: Optional[int] = 5,
+    early_stop_ipsae_threshold: Optional[float] = None,
+    batch_refill: bool = False,
     device: InferenceDevice = "auto",
 ) -> None:
     """
@@ -680,6 +689,9 @@ def inference_jsons(
         diffusion_attention_backend=diffusion_attention_backend,
         reuse_diffusion_window_masks=reuse_diffusion_window_masks,
         diffusion_cuda_graph=diffusion_cuda_graph,
+        sample_diffusion_chunk_size=sample_diffusion_chunk_size,
+        early_stop_ipsae_threshold=early_stop_ipsae_threshold,
+        batch_refill=batch_refill,
         model_name=model_name,
         load_checkpoint_path=load_checkpoint_path,
         use_msa=use_msa,
@@ -769,7 +781,7 @@ def inference_jsons(
 @click.option(
     "--batch_size",
     type=click.IntRange(min=1),
-    default=1,
+    default=2,
     show_default=True,
     help="Independent complexes per GPU forward (no MSA/templates/guidance; Fold-CP single).",
 )
@@ -805,8 +817,9 @@ def inference_jsons(
 @click.option(
     "--use_msa",
     type=bool,
-    default=True,
-    help="Whether to use MSA for inference.",
+    default=False,
+    show_default=True,
+    help="Use protein MSA for inference; requires --batch_size 1.",
 )
 @click.option(
     "--use_default_params",
@@ -819,14 +832,14 @@ def inference_jsons(
     type=click.Choice(
         ("auto", "cuequivariance", "torch", "flashpairformer"), case_sensitive=False
     ),
-    default="auto",
+    default="flashpairformer",
     show_default=True,
-    help="Stable triangle multiplication uses auto; flashpairformer (TMK3) is an optional BF16 backend.",
+    help="TMK3 triangle multiplication (requires opt_core and cuEquivariance); select auto or torch for portable execution.",
 )
 @click.option(
     "--triatt_kernel",
     type=click.Choice(("auto", "cuequivariance", "torch"), case_sensitive=False),
-    default="auto",
+    default="cuequivariance",
     show_default=True,
     help="Triangle attention kernel ('auto', 'cuequivariance', or 'torch').",
 )
@@ -989,13 +1002,15 @@ def inference_jsons(
 @click.option(
     "--confidence_sample_chunk_size",
     type=click.IntRange(min=1),
-    default=1,
-    help="Confidence samples processed together per complex; use 5 for five-sample inference when memory permits.",
+    default=5,
+    show_default=True,
+    help="Confidence samples processed together per complex; reduce for lower peak memory. Screening requires 1.",
 )
 @click.option(
     "--batch_max_padding_ratio",
     type=click.FloatRange(min=0),
-    default=0.0,
+    default=1.0,
+    show_default=True,
     help="Maximum padded/unpadded cubic work in both residue and structural tokens; 0 disables, 1 requires equal counts in both.",
 )
 @click.option(
@@ -1022,6 +1037,24 @@ def inference_jsons(
     default="reference",
     show_default=True,
     help="Stable native batched attention uses reference; optional efficient CUDA SDPA layouts can change predictions.",
+)
+@click.option(
+    "--sample_diffusion_chunk_size",
+    type=click.IntRange(min=1),
+    default=5,
+    help="Diffusion samples per chunk; screening requires 1. Changing this can change predictions.",
+)
+@click.option(
+    "--early_stop_ipsae_threshold",
+    type=click.FloatRange(min=0, max=1),
+    default=None,
+    help="Optional first-sample ipSAE cutoff; zero or below cutoff stops. Requires no-MSA native batching and sample/confidence chunks of 1.",
+)
+@click.option(
+    "--batch_refill",
+    type=bool,
+    default=False,
+    help="Optional fixed-slot refill after first-sample screening; requires batch_size > 1 and sample > 1. Both token counts must match.",
 )
 @click.option(
     "--diffusion_cuda_graph",
@@ -1076,14 +1109,17 @@ def predict(
     foldcp_size_cp: int = 1,
     foldcp_devices: str = "",
     foldcp_metrics_jsonl: str = "",
-    batch_size: int = 1,
-    confidence_sample_chunk_size: int = 1,
+    batch_size: int = 2,
+    confidence_sample_chunk_size: int = 5,
     diffusion_cache_max_mb: int = 2048,
     share_diffusion_sample_conditioning: bool = True,
     diffusion_attention_backend: Literal["reference", "efficient"] = "reference",
     reuse_diffusion_window_masks: bool = True,
     diffusion_cuda_graph: bool = False,
-    batch_max_padding_ratio: float = 0.0,
+    sample_diffusion_chunk_size: Optional[int] = 5,
+    early_stop_ipsae_threshold: Optional[float] = None,
+    batch_refill: bool = False,
+    batch_max_padding_ratio: float = 1.0,
     batch_max_pair_tokens: int = 0,
 ) -> None:
     """
@@ -1205,6 +1241,9 @@ def predict(
         diffusion_attention_backend=diffusion_attention_backend,
         reuse_diffusion_window_masks=reuse_diffusion_window_masks,
         diffusion_cuda_graph=diffusion_cuda_graph,
+        sample_diffusion_chunk_size=sample_diffusion_chunk_size,
+        early_stop_ipsae_threshold=early_stop_ipsae_threshold,
+        batch_refill=batch_refill,
         dtype=dtype,
         device=device,
         model_name=model_name,

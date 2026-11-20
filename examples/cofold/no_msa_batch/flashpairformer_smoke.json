@@ -1,0 +1,54 @@
+[
+  {
+    "name": "synthetic_complex_64_64",
+    "modelSeeds": [
+      101
+    ],
+    "sequences": [
+      {
+        "proteinChain": {
+          "sequence": "INRMKCYQDDLSVRLNECKGCEEHEAMMAYYWNPGKWDDTQITQCFVASWVHRALHITPSFFPG",
+          "count": 1,
+          "id": [
+            "A"
+          ]
+        }
+      },
+      {
+        "proteinChain": {
+          "sequence": "KAQYFYIHANEQEGMPTMHDNGVKTPCRVDEWEWRHVNFWLDFPSLAGAISCCICQTYDMKLRS",
+          "count": 1,
+          "id": [
+            "B"
+          ]
+        }
+      }
+    ]
+  },
+  {
+    "name": "synthetic_complex_64_128",
+    "modelSeeds": [
+      101
+    ],
+    "sequences": [
+      {
+        "proteinChain": {
+          "sequence": "TTAYFEAYMLMCDHALPEWDQCYMRGEKSKDPHVNGQFKAQNRFTWHSIRDSEPCCVNGWLVII",
+          "count": 1,
+          "id": [
+            "A"
+          ]
+        }
+      },
+      {
+        "proteinChain": {
+          "sequence": "WQSGHCKHMADTESAEVVHVCFICCTIGWIEVILYNRQDMRNHYQPICKFNPKDNFATPALDLMYQPAHLDRECFHKMCLGIYFRYKSRVTLGWNPQIVGAEPYSEMDETQRDFKWFGWSAGNTWMSH",
+          "count": 1,
+          "id": [
+            "B"
+          ]
+        }
+      }
+    ]
+  }
+]

@@ -1479,6 +1479,30 @@ class InferenceRunner(object):
         with amp:
             return self.model.forward_batch(features)
 
+    @torch.no_grad()
+    def predict_refill(self, batches, on_prediction):
+        from opendde.model.refill import forward_refill
+        from opendde.model.opendde import _tf32_runtime_scope
+
+        amp = (
+            torch.autocast(device_type=self.device.type, dtype=torch.bfloat16)
+            if self.configs.dtype == "bf16" and self.device.type in {"cuda", "mps"}
+            else nullcontext()
+        )
+
+        def features():
+            for batch in batches:
+                yield [
+                    (key, to_device(data["input_feature_dict"], self.device), seed)
+                    for key, data, seed in batch
+                ]
+
+        with amp, _tf32_runtime_scope(self.configs.enable_tf32):
+            self.last_refill_stats = forward_refill(
+                self.model, features(), on_prediction
+            )
+        return self.last_refill_stats
+
     def update_model_configs(self, new_configs: OpenDDEConfig) -> None:
         """
         Update per-inference runtime configuration without rebuilding the model.
@@ -1575,8 +1599,15 @@ def _sampler_owns_inference_sample(sampler: Any, data: Mapping[str, Any]) -> boo
 
 def infer_predict(runner: InferenceRunner, configs: Any) -> None:
     """Run inference with CPU control planes for job/error coordination."""
-    if getattr(configs, "batch_size", 1) > 1 or getattr(
-        getattr(configs, "infer_setting", None), "diffusion_cuda_graph", False
+    if (
+        getattr(configs, "batch_size", 1) > 1
+        or getattr(
+            getattr(configs, "infer_setting", None), "diffusion_cuda_graph", False
+        )
+        or getattr(
+            getattr(configs, "infer_setting", None), "early_stop_ipsae_threshold", None
+        )
+        is not None
     ):
         from runner.batched_prediction import infer_predict_batched
 

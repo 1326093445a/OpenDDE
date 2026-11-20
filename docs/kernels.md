@@ -20,6 +20,34 @@ export LAYERNORM_TYPE=fast_layernorm
 Use `torch` for CPU, debugging, or environments where CUDA extension compilation
 is unavailable.
 
+Set this variable before starting Python; module imports select the implementation.
+The optional extension falls back to PyTorch if it cannot load, so selecting the
+variable alone does not establish that the fused kernel ran. It covers modules
+using OpenDDE's LayerNorm factory, including the normalizations inside adaptive
+LayerNorm, without removing their conditioning.
+
+Fused LayerNorm is **not an output-preserving optimization**. A CUDA check under
+Torch 2.7.1 on an H200 (2026-11-20) loaded the extension and passed 32 finite-output
+and repeatability checks across FP32/BF16, widths 32/128/384/768, and all affine
+parameter combinations. A full native-singleton 7r6r comparison used identical
+features and seeds, BF16 mixed precision, ten recycles, 200 steps, one sample,
+TMK3 multiplication, reference diffusion attention, and no compilation or replay.
+Fused runs repeated bitwise, but changing from Torch LayerNorm moved coordinates
+by **6.615 Å all-atom aligned RMSD**, changed mean pLDDT from 65.4435 to 65.0604,
+and changed ipTM from 0.7744 to 0.7652. The largest expected-PAE change was 5.363 Å.
+ipSAE was undefined for this example, so this comparison does not validate ipSAE
+stability. Shared-GPU timings do not establish a LayerNorm speedup.
+
+Keep `LAYERNORM_TYPE=torch` when preserving the current prediction baseline.
+The optional CUDA forward kernel now honors the caller stream, as in Mol-1,
+including side-stream graph capture. Twelve CUDA tests cover capture and replay
+with changed inputs across FP32/BF16/FP16 and all affine-parameter combinations.
+A full 7r6r replay check at ten recycles, 200 steps and one sample also matched
+the saved fused-eager prediction bitwise across coordinates and confidence, with
+one capture and 200 replays per prediction. This fixes stream correctness; it
+does not make fused LayerNorm numerically equivalent to Torch LayerNorm. Keep the
+backend fixed when comparing replay against eager predictions.
+
 ## Triangle kernels
 
 Both triangle attention and triangle multiplication support:
@@ -31,15 +59,16 @@ Both triangle attention and triangle multiplication support:
 | `torch` | Select OpenDDE's PyTorch triangle implementation. Distributed CUDA BF16 triangle attention also uses Triton for attention-bias fusion. |
 
 Triangle multiplication additionally accepts **`flashpairformer`** for the
-optional exact-mode TMK3 implementation. `auto` retains its existing behavior;
+exact-mode TMK3 implementation, now the default multiplication backend.
+Attention defaults to `cuequivariance`. `auto` retains its existing behavior;
 triangle attention does not accept this value.
 
-CLI flags:
+Default CLI flags (require the GPU dependencies below):
 
 ```bash
 opendde pred \
-  --triatt_kernel auto \
-  --trimul_kernel auto
+  --triatt_kernel cuequivariance \
+  --trimul_kernel flashpairformer
 ```
 
 ### Multi-GPU Fold-CP limitation
@@ -60,7 +89,16 @@ to multi-GPU Fold-CP only. Single-GPU inference may continue to use `auto` or
 rejected before GPU-kernel probing. Independent jobs on separate GPUs may use
 TMK3; this is distinct from splitting one model forward across GPUs.
 
-## Optional TMK3 triangle multiplication
+<a id="optional-tmk3-triangle-multiplication"></a>
+
+## TMK3 triangle multiplication
+
+For a ready-to-run **eager TMK3 + cuEquivariance** configuration, use the
+[README example](../README.md#optional-flashpairformer-with-eager-inference).
+It selects reference diffusion attention, retains existing caches/fusions,
+and explicitly disables replay. No model compilation is enabled. The dedicated
+128/192-residue input exercises eligible TMK3 shapes; smaller inputs may use
+the documented fallback.
 
 Keep the production environment: the adapter is validated with **Torch
 2.7.1+cu126, Triton 3.3.1 and opt_core 0.5.228.0** on H200. No Torch or Triton
@@ -120,6 +158,23 @@ TEST_FLASHPAIRFORMER_CUDA=1 LAYERNORM_TYPE=torch \
   python -m pytest tests/test_flashpairformer.py -ra
 ```
 
+### Eager configuration recheck, 2026-11-20
+
+The installed Torch 2.7.1 / Triton 3.3.1 / opt_core 0.5.228.0 environment
+passed **13 tests and 102 subtests** with the CUDA gate enabled. Complete 7r6r
+inference at BF16, ten recycles, 200 steps and one sample matched the
+cuEquivariance reference **bitwise across every returned field**, including
+coordinates and confidence. Each mode repeated bitwise; the emitted CIF and
+both confidence JSON files also matched byte-for-byte. Each TMK3 prediction
+served **1,208 exact calls**, with eight FP32-compute fallbacks. Replay and
+model-compilation counters were zero throughout.
+
+The README command also completed the two-job 128/192-residue fixture with
+one sample per job. Both CIF/confidence sets passed finite-value, atom-count
+and PAE-dimension checks. General defaults remain unchanged. These checks ran
+on shared H200 GPUs and establish no new throughput estimate or universal
+numerical-equivalence guarantee.
+
 ### cuEquivariance on-demand tuning
 
 An alternative experiment is `CUEQ_TRITON_TUNING=ONDEMAND` with
@@ -133,8 +188,9 @@ subsequent full-model H200 comparison found **7.605 s for TMK3 versus 7.636 s
 for tuned cuEquivariance**, with an untuned baseline of **8.006 s**. The two
 optimized choices were too close to establish a decisive speed winner.
 Full-workload tuning also changed confidence values at small FP32 rounding
-scales, while TMK3 preserved the default outputs bitwise. Keep `auto` as the
-general default; see the report for setup costs, memory and workload limits.
+scales, while TMK3 preserved the compared outputs bitwise. TMK3 is now the
+default multiplication backend; see the report for setup costs, memory and
+workload limits. Explicit `auto` retains the previous dispatch policy.
 
 ## Compatibility run
 
