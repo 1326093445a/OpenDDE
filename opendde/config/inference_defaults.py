@@ -20,8 +20,8 @@ inference_configs: dict[str, Any] = {
     "input_json_path": RequiredValue(str),
     "load_checkpoint_dir": os.path.join(OPENDDE_ROOT_DIR, "checkpoint"),
     "num_workers": 0,
-    "batch_size": 2,
-    "use_msa": False,
+    "batch_size": 1,
+    "use_msa": True,
     # Retain the validated eager caches/fusions. These do not enable torch.compile
     # or CUDA replay; later experiments must not change the default execution path.
     "enable_tf32": False,

@@ -372,7 +372,7 @@ def get_default_runner(
     dtype: InferenceDtype = "bf16",
     model_name: str = DEFAULT_MODEL_NAME,
     load_checkpoint_path: str = "",
-    use_msa: bool = False,
+    use_msa: bool = True,
     trimul_kernel="flashpairformer",
     triatt_kernel="cuequivariance",
     enable_cache=True,
@@ -390,9 +390,9 @@ def get_default_runner(
     foldcp_devices: str = "",
     foldcp_metrics_jsonl: str = "",
     *,
-    batch_size: int = 2,
+    batch_size: int = 1,
     confidence_sample_chunk_size: Optional[int] = 5,
-    batch_max_padding_ratio: float = 1.0,
+    batch_max_padding_ratio: float = 0.0,
     batch_max_pair_tokens: int = 0,
     diffusion_cache_max_mb: int = 2048,
     share_diffusion_sample_conditioning: bool = True,
@@ -564,7 +564,7 @@ def get_default_runner(
 def inference_jsons(
     json_file: str,
     out_dir: str = "./output",
-    use_msa: bool = False,
+    use_msa: bool = True,
     seeds: Optional[list[int]] = None,
     n_cycle: int = 10,
     n_step: int = 200,
@@ -600,9 +600,9 @@ def inference_jsons(
     foldcp_devices: str = "",
     foldcp_metrics_jsonl: str = "",
     *,
-    batch_size: int = 2,
+    batch_size: int = 1,
     confidence_sample_chunk_size: Optional[int] = 5,
-    batch_max_padding_ratio: float = 1.0,
+    batch_max_padding_ratio: float = 0.0,
     batch_max_pair_tokens: int = 0,
     diffusion_cache_max_mb: int = 2048,
     share_diffusion_sample_conditioning: bool = True,
@@ -781,7 +781,7 @@ def inference_jsons(
 @click.option(
     "--batch_size",
     type=click.IntRange(min=1),
-    default=2,
+    default=1,
     show_default=True,
     help="Independent complexes per GPU forward (no MSA/templates/guidance; Fold-CP single).",
 )
@@ -817,7 +817,7 @@ def inference_jsons(
 @click.option(
     "--use_msa",
     type=bool,
-    default=False,
+    default=True,
     show_default=True,
     help="Use protein MSA for inference; requires --batch_size 1.",
 )
@@ -1009,7 +1009,7 @@ def inference_jsons(
 @click.option(
     "--batch_max_padding_ratio",
     type=click.FloatRange(min=0),
-    default=1.0,
+    default=0.0,
     show_default=True,
     help="Maximum padded/unpadded cubic work in both residue and structural tokens; 0 disables, 1 requires equal counts in both.",
 )
@@ -1109,7 +1109,7 @@ def predict(
     foldcp_size_cp: int = 1,
     foldcp_devices: str = "",
     foldcp_metrics_jsonl: str = "",
-    batch_size: int = 2,
+    batch_size: int = 1,
     confidence_sample_chunk_size: int = 5,
     diffusion_cache_max_mb: int = 2048,
     share_diffusion_sample_conditioning: bool = True,
@@ -1119,7 +1119,7 @@ def predict(
     sample_diffusion_chunk_size: Optional[int] = 5,
     early_stop_ipsae_threshold: Optional[float] = None,
     batch_refill: bool = False,
-    batch_max_padding_ratio: float = 1.0,
+    batch_max_padding_ratio: float = 0.0,
     batch_max_pair_tokens: int = 0,
 ) -> None:
     """

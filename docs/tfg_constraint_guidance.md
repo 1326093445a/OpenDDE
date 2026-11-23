@@ -3,7 +3,7 @@
 `constraint` fields in the input JSON (see
 [`infer_json_format.md`](infer_json_format.md)) steer inference through
 Training-Free Guidance (TFG). They work with any checkpoint, need
-`--use_tfg_guidance true`, and change only the sampled coordinates; the trunk
+`--batch_size 1 --use_tfg_guidance true`, and change only the sampled coordinates; the trunk
 and the weights are untouched.
 
 ## Two ways to apply `constraint.contact`

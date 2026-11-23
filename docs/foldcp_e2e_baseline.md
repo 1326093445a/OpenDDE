@@ -33,7 +33,7 @@ CUDA_VISIBLE_DEVICES=0 \
 CUBLAS_WORKSPACE_CONFIG=:4096:8 \
 python -m runner.batch_inference pred \
   -i input.json -o output_p1 -n opendde_v1 \
-  --sample 1 --step 2 --cycle 1 --dtype bf16 \
+  --batch_size 1 --sample 1 --step 2 --cycle 1 --dtype bf16 \
   --use_msa true --use_template false --use_rna_msa false \
   --trimul_kernel torch --triatt_kernel torch --enable_tf32 false \
   --deterministic true \
@@ -52,7 +52,7 @@ CUBLAS_WORKSPACE_CONFIG=:4096:8 \
 torchrun --standalone --nproc_per_node "$P" \
   -m runner.batch_inference pred \
   -i input.json -o "output_p${P}" -n opendde_v1 \
-  --sample 1 --step 2 --cycle 1 --dtype bf16 \
+  --batch_size 1 --sample 1 --step 2 --cycle 1 --dtype bf16 \
   --use_msa true --use_template false --use_rna_msa false \
   --trimul_kernel torch --triatt_kernel torch --enable_tf32 false \
   --deterministic true \

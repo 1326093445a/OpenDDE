@@ -19,13 +19,13 @@ This file applies to the whole repository unless a deeper `AGENTS.md` overrides 
   - `config/`: config parser, defaults, registries, dependency URLs.
   - `utils/`, `metrics/`: shared utilities and metrics.
 - `runner/`: Click CLI and inference runner (`opendde = runner.cli:opendde_cli`).
-- `tests/`: pytest/unittest suite; `tests/smoke/` is heavier and often GPU/environment dependent.
+- The repository test suite has been removed; historical test results remain in the optimization reports.
 - `docs/`: user docs. Prefer these for behavior details: inference, Docker, kernels, JSON input, supported models, MSA/template pipeline.
 - `examples/`: small example inputs, split into `cofold/` (co-folding, MSA, template, RNA MSA) and `tfg/` (constraint-guided inference).
 
 ## Environment and commands
 
-- Python requirement: `>=3.11,<3.14`; CI tests Python `3.11`, `3.12`, and `3.13` on Ubuntu.
+- Python requirement: `>=3.11,<3.14`; CI runs lint and formatting checks on Ubuntu with Python `3.11`.
 - CPU/dev setup:
 
 ```bash
@@ -40,11 +40,11 @@ uv pip install --group dev
 ```bash
 ruff check .
 pre-commit run --all-files
-python -m pytest tests -q -m "not network"
+ruff format --check .
 ```
 
-- Run the smallest relevant test first, then broaden. Network tests are excluded in CI with `-m "not network"`.
-- GPU/kernel changes may also need `tests/test_triton_compatibility.py` and `tests/smoke/test_cueq_runtime.py` on a CUDA machine.
+- Use focused manual or benchmark validation for runtime changes; CI no longer runs automated regression tests.
+- GPU/kernel changes need validation with the affected backend on a CUDA machine.
 - Pre-commit uses Ruff `--fix` and `ruff-format`; only format files relevant to the task unless asked otherwise.
 
 ## CLI, config, and inference

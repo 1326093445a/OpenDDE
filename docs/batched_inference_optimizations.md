@@ -1,16 +1,23 @@
 # Mixed-length inference and native ipSAE
 
+The repository test suite has been removed. Test counts and pytest commands in
+this report record historical validation and require a pre-removal revision to
+reproduce. Benchmark scripts remain available in `scripts/`.
+
 ## Current default policy, 2026-11-20
 
 The default now uses Torch LayerNorm, TMK3 triangle multiplication,
 cuEquivariance triangle attention and diffusion/confidence chunks of five.
 All five samples are generated; early stopping, refill and replay remain off.
+Batching defaults remain one job, padding cap disabled, and protein MSA on.
+For multi-design runs, explicitly select a batch size and use padding ratio 1.0
+with MSA off; see [batching and padding](batching_and_padding.md).
 See the [current settings and dependency requirements](inference_instructions.md#default-inference-baseline).
 Measurements below retain their original settings. In particular, benchmark
 scripts may specify older controls; select kernel and confidence chunk settings
 explicitly when reproducing or comparing them.
 
-Default-policy validation: 204 targeted tests passed; four opt-in CUDA ragged
+Kernel/chunk-policy validation, before the batching-default change: 204 targeted tests passed; four opt-in CUDA ragged
 regressions were skipped in that test invocation. A separate real CUDA CLI run
 used the new defaults on the 128/192-residue fixture at ten recycles and 200 steps,
 with no sample/kernel/chunk overrides. Both jobs produced all five samples:

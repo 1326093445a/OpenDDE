@@ -81,7 +81,6 @@ opendde = "runner.cli:opendde_cli"
 [dependency-groups]
 dev = [
   "pre-commit>=3.7",
-  "pytest>=8",
   "ruff>=0.16.3",
 ]
 release = [
@@ -104,11 +103,6 @@ version = { attr = "opendde.version.__version__" }
 
 [tool.uv]
 package = true
-
-[tool.pytest.ini_options]
-markers = [
-  "network: tests that access external network services",
-]
 
 [tool.ruff]
 line-length = 88

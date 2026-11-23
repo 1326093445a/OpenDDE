@@ -129,7 +129,7 @@ OpenDDE.
 
 TMK3 serves no-grad evaluation on CUDA, with BF16 compute and BF16 or FP32
 resident pair tensors. Equal input/hidden widths divisible by 64 are required;
-width 384 is covered by the OpenDDE tests. It preserves cuEquivariance's
+width 384 was covered by the historical OpenDDE tests. It preserves cuEquivariance's
 short-sequence dispatch (at least 100 tokens) and supports leading batch axes
 by evaluating each pair with shared packed weights. Residual addition remains
 in OpenDDE, preserving its dtype and avoiding in-place input mutation.
@@ -151,12 +151,8 @@ Parameters created inside `torch.inference_mode()` have no version counters;
 their packed weights are rebuilt on every call so in-place updates stay safe.
 
 See [the optimization report](batched_inference_optimizations.md) for measured
-whole-model results. To validate the backend directly:
-
-```bash
-TEST_FLASHPAIRFORMER_CUDA=1 LAYERNORM_TYPE=torch \
-  python -m pytest tests/test_flashpairformer.py -ra
-```
+whole-model results and benchmark commands. The repository test suite has been
+removed; the test results below describe validation before that removal.
 
 ### Eager configuration recheck, 2026-11-20
 

@@ -109,7 +109,7 @@ opendde pred \
   -i examples/cofold/template/example_9fm7.json \
   -o ./output \
   -n opendde_v1 \
-  --use_msa true \
+  --batch_size 1 --use_msa true \
   --use_template true \
   --use_rna_msa false
 ```
@@ -131,7 +131,7 @@ opendde pred \
   -i ./output/.opendde_preprocessed/<input-hash>/example_without_msa-final-updated.json \
   -o ./output \
   -n opendde_v1 \
-  --use_msa true \
+  --batch_size 1 --use_msa true \
   --use_template true \
   --use_rna_msa false
 ```
@@ -149,7 +149,7 @@ opendde pred \
   -i examples/cofold/rna_msa/example_9gmw_2.json \
   -o ./output \
   -n opendde_v1 \
-  --use_rna_msa true
+  --batch_size 1 --use_msa true --use_rna_msa true
 ```
 
 To generate RNA MSA for your own RNA input, run `opendde prep` first.

@@ -257,7 +257,8 @@ below that.
 
 ## Default inference baseline
 
-The default generates all five requested samples with Torch LayerNorm, TMK3
+The default processes one design at a time, with the padding cap disabled and
+protein MSA enabled. It generates all five requested samples with Torch LayerNorm, TMK3
 multiplication, cuEquivariance attention and diffusion/confidence chunks of five.
 Early stopping, refill and CUDA replay remain disabled. Existing correctness
 fixes, eager caches and precision policy remain active. An explicitly exported
@@ -276,7 +277,9 @@ fixes, eager caches and precision policy remain active. An explicitly exported
 | CUDA denoiser replay | `--diffusion_cuda_graph false` | `true`, subject to the restrictions below |
 | Compilation and independent aggregation-plan-cache experiments | Off; no prediction CLI flag | Benchmark scripts only |
 | TF32 | `--enable_tf32 false` | Explicit override |
-| Batch limit / samples | `1` / `5` | Select for the workload; one-sample examples explicitly use `--sample 1` |
+| Batch limit / samples | `1` / `5` | Explicitly select `--batch_size 2` or more for native no-MSA batching |
+| Padding ratio / pair-token budget | `0.0` / `0` (disabled) | Recommend padding ratio `1.0` for multi-design batching |
+| Protein MSA / templates / RNA MSA | On / off / off | Native batching requires all three off; RNA MSA needs protein MSA on |
 
 The default CUDA path requires cuEquivariance and opt_core; see the
 [kernel installation guide](kernels.md#optional-tmk3-triangle-multiplication).
@@ -311,21 +314,29 @@ Keep them in one JSON job list so the scheduler can collect them into batches:
 ```bash
 opendde pred -i examples/cofold/no_msa_batch/inputs.json -o ./output/batched \
   --use_msa false --use_template false --use_rna_msa false \
-  --batch_size 2 --sample 3
+  --batch_size 2 --batch_max_padding_ratio 1.0 --sample 3
 ```
 
 Here a full batch contains two complexes with three diffusion samples each.
-`--sample` and `--batch_size` are separate axes. The default `--batch_size 1`
-retains the existing single-job path unless CUDA replay is explicitly enabled.
+`--sample` and `--batch_size` are separate axes. Defaults remain `--batch_size 1`,
+`--sample 5`, `--batch_max_padding_ratio 0.0` and `--use_msa true`. The command
+above explicitly opts into no-MSA batching with the recommended padding cap.
+See [batching and padding](batching_and_padding.md) before increasing batch size.
+`--batch_size 1` selects the legacy single-job path unless screening or replay
+selects native batching. A singleton left over by the batch scheduler stays on
+the native path; it is not the same numerical baseline as legacy serial inference.
 Each job/seed gets its
 own structures, confidence summaries, PAE/PDE maps, atom pLDDT and rankings.
-The final batch may be smaller. Jobs are grouped by approximate sequence length
-and precision policy; a CUDA out-of-memory failure retries smaller batches.
+The final batch may be smaller. Candidates follow the existing seed schedule,
+approximate-length ordering and precision policy. The cap only admits matching
+consecutive candidates; it does not globally regroup all equal-size jobs. A CUDA
+out-of-memory failure retries smaller batches.
 
-Optional `--batch_max_padding_ratio` and `--batch_max_pair_tokens` limits can
-flush smaller groups before `--batch_size` is reached. Both default to `0`
-(disabled) and apply separately to residue and expanded structural-token
-counts. A padding ratio of `1.0` requires equal counts in **both** spaces:
+The `--batch_max_padding_ratio` and `--batch_max_pair_tokens` limits can flush
+smaller groups before `--batch_size` is reached. Both limits default to zero
+(disabled). For multiple designs, we recommend padding ratio `1.0`. Both apply separately
+to residue and expanded structural-token counts. Ratio `1.0` requires equal
+counts in **both** spaces:
 equal sequence lengths alone are insufficient because structural counts can
 vary with residue composition. The startup log records the effective limits;
 early-flush logs identify the exceeded limit and both candidate token counts.
@@ -544,7 +555,7 @@ CUDA_VISIBLE_DEVICES=0,1,2,3 torchrun --standalone --nproc_per_node 4 \
   --cycle 10 \
   --trimul_kernel torch \
   --triatt_kernel torch \
-  --foldcp_mode distributed \
+  --batch_size 1 --foldcp_mode distributed \
   --foldcp_size_dp 1 \
   --foldcp_size_cp 4
 ```
@@ -572,11 +583,11 @@ Use prepared features:
 ```bash
 opendde pred -i examples/cofold/template/example_9fm7.json \
   -o ./output -n opendde_v1 \
-  --use_msa true --use_template true
+  --batch_size 1 --use_msa true --use_template true
 
 opendde pred -i examples/cofold/rna_msa/example_9gmw_2.json \
   -o ./output -n opendde_v1 \
-  --use_rna_msa true
+  --batch_size 1 --use_msa true --use_rna_msa true
 ```
 
 ## Optional TFG Guidance
@@ -587,7 +598,7 @@ sampled trajectory with geometry potentials while keeping the requested
 
 ```bash
 opendde pred -i examples/cofold/input.json -o ./output -n opendde_v1 \
-  --use_tfg_guidance true
+  --batch_size 1 --use_tfg_guidance true
 ```
 
 Outputs are written to:
@@ -610,13 +621,14 @@ of [infer_json_format.md](./infer_json_format.md) and
 | `-n`, `--model_name` | Model name. Currently `opendde_v1`. |
 | `--load_checkpoint_path` | Explicit checkpoint path. |
 | `--seeds` | Comma-separated seeds, e.g. `101,102`. Overrides the job's `modelSeeds`; if unset, `modelSeeds` are used, or a random seed when both are absent. |
-| `--batch_size` | Maximum independent complexes per GPU forward; default `1`. Values above `1` require the no-MSA batching mode described above. |
+| `--batch_size` | Maximum independent complexes per GPU forward; default `1`. Values above `1` require no-MSA native batching. |
+| `--batch_max_padding_ratio` | Default `0.0` (disabled). Recommended `1.0` for multi-design batches requires both token counts to match. |
 | `--diffusion_cuda_graph` | Experimental request-scoped denoiser replay; default `false`. Selects native no-MSA batching even for singletons. |
 | `--sample` | Number of diffusion samples per complex, independent of `--batch_size`. |
 | `--sample_diffusion_chunk_size`, `--confidence_sample_chunk_size` | Defaults `5` / `5`. Screening requires both to be `1`. |
 | `--early_stop_ipsae_threshold` | Optional first-generated-sample ipSAE cutoff; omitted by default. |
 | `--batch_refill` | Optional fixed-slot refill after screening; default `false`. Requires multiple jobs and samples. |
-| `--use_msa` | Use/generate protein MSA features. |
+| `--use_msa` | Default `true`. Use `false` for native multi-design batching. |
 | `--use_template` | Use/generate template features. |
 | `--use_rna_msa` | Use/generate RNA MSA features; requires `--use_msa true`. |
 | `--use_tfg_guidance` | Enable Training-Free Guidance. |

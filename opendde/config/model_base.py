@@ -54,7 +54,7 @@ model_configs: dict[str, Any] = {
         "confidence_sample_chunk_size": ValueMaybeNone(5),
         "early_stop_ipsae_threshold": DefaultNoneWithType(float),
         "batch_refill": False,
-        "batch_max_padding_ratio": 1.0,
+        "batch_max_padding_ratio": 0.0,
         "batch_max_pair_tokens": 0,
         "diffusion_cache_max_mb": 2048,
         "share_diffusion_sample_conditioning": True,

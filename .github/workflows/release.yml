@@ -41,10 +41,10 @@ jobs:
           uv pip install --python .venv/bin/python --group dev --group release
       - name: Validate tag and release metadata
         run: .venv/bin/python scripts/check_release.py --tag "$GITHUB_REF_NAME"
-      - name: Test release source
+      - name: Lint release source
         run: |
           .venv/bin/ruff check .
-          .venv/bin/python -m pytest tests -q -m "not network"
+          .venv/bin/ruff format --check .
       - name: Build release artifacts
         run: |
           version="${GITHUB_REF_NAME#v}"

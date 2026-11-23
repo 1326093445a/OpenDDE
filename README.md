@@ -209,8 +209,8 @@ Outputs are written under:
 output/<job_name>/seed_<seed>/predictions/
 ```
 
-For production runs, enable the preprocessing features you need, for example
-`--use_msa true`, `--use_template true`, or `--use_rna_msa true`. Those paths may
+For runs using external features, select `--batch_size 1` and enable the
+preprocessing features you need, for example `--use_msa true`, `--use_template true`, or `--use_rna_msa true`. Those paths may
 require network access, HMMER/Kalign binaries, and large local search databases;
 see the inference guide for details.
 
@@ -218,7 +218,11 @@ see the inference guide for details.
 
 **The default generates all five samples:** Torch LayerNorm, TMK3 triangle
 multiplication, cuEquivariance triangle attention, and diffusion/confidence
-chunks of five. Early stopping, batch refill and CUDA replay are off. BF16 mixed
+chunks of five. Batch size remains one, the padding cap is disabled, and protein
+MSA is on. Templates, RNA MSA, early stopping, batch refill and CUDA replay are off.
+For multiple designs, explicitly set `--batch_size 2`,
+`--batch_max_padding_ratio 1.0` and `--use_msa false`; see
+[batching and padding guidance](docs/batching_and_padding.md). BF16 mixed
 precision, reference diffusion attention and existing caches/fusions remain in
 use; compiler experiments stay benchmark-only. The length-dependent precision
 policy is unchanged. Install the [GPU kernel dependencies](docs/kernels.md#optional-tmk3-triangle-multiplication)
@@ -250,14 +254,17 @@ CUDA_VISIBLE_DEVICES=0 LAYERNORM_TYPE=torch python -m runner.batch_inference pre
   -o ./output/eager_example \
   --device cuda \
   --use_msa false --use_template false --use_rna_msa false \
-  --batch_size 2 --cycle 10 --step 200
+  --batch_size 2 --batch_max_padding_ratio 1.0 --cycle 10 --step 200
 ```
 
 This uses TMK3 multiplication, cuEquivariance attention and chunks of five without
 extra kernel flags. It generates **five structures per complex**, with separate
 CIF and confidence outputs under `output/eager_example/<job_name>/seed_101/`.
-For a quick execution check, reduce cycles/steps. The batch limit is explicitly
-two; the CLI default remains one. Screening, refill and replay are disabled.
+For a quick execution check, reduce cycles/steps. This command explicitly sets
+the batch limit to two and padding cap to 1.0; CLI defaults remain one and 0.0.
+These unequal-length inputs run as native singletons with the recommended cap;
+equal counts in both token spaces permit a two-job forward.
+Screening, refill and replay are disabled.
 
 Different lengths are supported, but padding can change BF16 predictions.
 Keep grouping fixed for reproducibility, and use the padding-ratio and pair-token
@@ -376,7 +383,7 @@ CUDA_VISIBLE_DEVICES=0,1,2,3 torchrun --standalone --nproc_per_node 4 \
   --cycle 10 \
   --trimul_kernel torch \
   --triatt_kernel torch \
-  --foldcp_mode distributed \
+  --batch_size 1 --foldcp_mode distributed \
   --foldcp_size_dp 1 \
   --foldcp_size_cp 4
 ```

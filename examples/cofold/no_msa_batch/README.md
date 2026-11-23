@@ -50,7 +50,7 @@ CUDA_VISIBLE_DEVICES=0 LAYERNORM_TYPE=torch python -m runner.batch_inference pre
   -o ./output/no_msa_batch_smoke \
   --device cuda --use_msa false --use_template false --use_rna_msa false \
   --trimul_kernel torch --triatt_kernel torch \
-  --sample 1 --step 20 --cycle 1 --deterministic true
+  --batch_size 1 --sample 1 --step 20 --cycle 1 --deterministic true
 ```
 
 This reduced-step run checks execution, not prediction quality. For a full
@@ -61,7 +61,11 @@ still determine how much of that work runs simultaneously.
 
 ## Multiple complexes per GPU
 
-Add `--batch_size 2` to the baseline command and use a separate output directory.
+Replace `--batch_size 1` with `--batch_size 2` in the baseline command and use a
+separate output directory. Add the recommended `--batch_max_padding_ratio 1.0`
+so only jobs with matching residue and structural-token counts share a forward.
+The default padding cap is disabled; see [batching and padding](../../../docs/batching_and_padding.md). To explicitly
+test mixed-length padding, also set `--batch_max_padding_ratio 0.0`.
 With `--sample 3`, each full batch has two complexes and three structures per
 complex. Pairformer, structural refiner and diffusion token-transformer calls
 run with a job batch dimension. Atom topology and confidence processing remain
@@ -69,7 +73,8 @@ per job. Different lengths are padded only at the token-network boundaries and
 are masked before attention; output atom and residue axes retain their original
 sizes.
 
-Start comparisons with `--dtype fp32` on both runs. Batch size defaults to `1`.
+Start comparisons with `--dtype fp32` on both runs. Batch size defaults to `1`;
+the baseline command explicitly selects legacy serial inference with `1`.
 Large batches can exceed GPU memory; forward OOMs trigger smaller-batch retries.
 
 ## Multi-GPU job-distribution check
@@ -119,9 +124,9 @@ triangle kernels, TF32 off, one recycle and 20 diffusion steps:
 
 - Single-GPU batches of two, with a partial final batch, and uneven two-GPU
   sharding completed for the first three fixtures.
-- The opt-in checkpoint test below compares three jobs with three samples each
-  against independent FP32 forwards. It checks coordinates, confidence logits,
-  summary scores and chain/atom mappings, and asserts an actual batched trunk
+- The former opt-in checkpoint test compared three jobs with three samples each
+  against independent FP32 forwards. It checked coordinates, confidence logits,
+  summary scores and chain/atom mappings, and asserted an actual batched trunk
   call.
 - All eight fixtures completed on two GPUs with `--batch_size 2 --sample 3
   --dtype fp32`, producing exactly 24 CIFs and 48 confidence JSONs. File checks
@@ -133,15 +138,8 @@ triangle kernels, TF32 off, one recycle and 20 diffusion steps:
   aligned RMSD in that comparison. Fixed seeds do not imply bitwise equality
   across batch shapes. Use FP32 for strict numerical checks.
 
-Run the checkpoint regression with cached runtime assets and an available GPU:
-
-```bash
-OPENDDE_RUN_BATCH_SMOKE=1 LAYERNORM_TYPE=torch python -m pytest \
-  tests/smoke/test_input_batching_runtime.py -q
-```
-
-CPU tests in `tests/test_input_batching.py` and `tests/test_batched_prediction.py`
-cover padding masks, equal job/sample/channel sizes, independent random streams,
+The repository test suite has been removed. Historical CPU tests covered
+padding masks, equal job/sample/channel sizes, independent random streams,
 sample chunking, cache/fusion modes, per-job seeds, output boundaries, rank
 ownership, partial batches and OOM retries. A real large-batch OOM also verified
 the retry path before the attention allocation fix.
